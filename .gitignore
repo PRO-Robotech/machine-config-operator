@@ -1,0 +1,40 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Claude Code
+.claude/
+
+# Go (for future)
+bin/
+vendor/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+
+# Kubernetes
+*.kubeconfig
+kubeconfig
+
+# Test artifacts
+test-output.log
+e2e-output.log
+coverage.html
+
+# Temporary
+*.tmp
+*.bak
+*~
+

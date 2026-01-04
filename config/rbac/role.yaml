@@ -1,0 +1,50 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+  - patch
+  - watch
+- apiGroups:
+  - mco.in-cloud.io
+  resources:
+  - machineconfigpools
+  - renderedmachineconfigs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - mco.in-cloud.io
+  resources:
+  - machineconfigpools/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - mco.in-cloud.io
+  resources:
+  - machineconfigpools/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - mco.in-cloud.io
+  resources:
+  - machineconfigs
+  verbs:
+  - get
+  - list
+  - watch

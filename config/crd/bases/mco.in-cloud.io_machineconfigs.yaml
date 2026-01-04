@@ -1,0 +1,152 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: machineconfigs.mco.in-cloud.io
+spec:
+  group: mco.in-cloud.io
+  names:
+    kind: MachineConfig
+    listKind: MachineConfigList
+    plural: machineconfigs
+    shortNames:
+    - mc
+    singular: machineconfig
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.priority
+      name: Priority
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          MachineConfig defines a fragment of host configuration.
+          Multiple MachineConfigs are merged by the controller based on priority
+          to produce a RenderedMachineConfig.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: MachineConfigSpec defines the desired state of MachineConfig.
+            properties:
+              files:
+                description: Files is the list of files to manage on the host.
+                items:
+                  description: FileSpec defines a file to be managed on the host.
+                  properties:
+                    content:
+                      description: Content is the file content. Required when state=present.
+                      maxLength: 1048576
+                      type: string
+                    mode:
+                      default: 420
+                      description: Mode is the Unix file permissions (e.g., 0644).
+                      maximum: 4095
+                      minimum: 0
+                      type: integer
+                    owner:
+                      default: root:root
+                      description: Owner is the file owner in format "user:group"
+                        or "uid:gid".
+                      pattern: ^[a-zA-Z0-9_-]+:[a-zA-Z0-9_-]+$|^[0-9]+:[0-9]+$
+                      type: string
+                    path:
+                      description: Path is the absolute path to the file on the host.
+                      pattern: ^/.*
+                      type: string
+                    state:
+                      default: present
+                      description: 'State is the desired state of the file: present
+                        or absent.'
+                      enum:
+                      - present
+                      - absent
+                      type: string
+                  required:
+                  - path
+                  type: object
+                type: array
+              priority:
+                default: 50
+                description: |-
+                  Priority determines the merge order. Lower values are applied first,
+                  higher values win on conflicts. Range: 0-99999.
+                maximum: 99999
+                minimum: 0
+                type: integer
+              reboot:
+                description: Reboot defines reboot requirements for this configuration.
+                properties:
+                  reason:
+                    description: |-
+                      Reason is a human-readable explanation for why reboot is required.
+                      This field is informational only and not included in hash computation.
+                    type: string
+                  required:
+                    default: false
+                    description: Required indicates whether a reboot is needed after
+                      applying this config.
+                    type: boolean
+                type: object
+              systemd:
+                description: Systemd defines systemd units to manage.
+                properties:
+                  units:
+                    description: Units is the list of systemd units to manage.
+                    items:
+                      description: UnitSpec defines a systemd unit to be managed.
+                      properties:
+                        enabled:
+                          description: Enabled sets whether the unit should start
+                            at boot.
+                          type: boolean
+                        mask:
+                          default: false
+                          description: Mask completely disables the unit (cannot be
+                            started).
+                          type: boolean
+                        name:
+                          description: Name is the unit name (e.g., "nginx.service").
+                          pattern: ^[a-zA-Z0-9@._-]+\.(service|socket|timer|mount|target)$
+                          type: string
+                        state:
+                          description: 'State is the desired runtime state: started,
+                            stopped, restarted, reloaded.'
+                          enum:
+                          - started
+                          - stopped
+                          - restarted
+                          - reloaded
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                type: object
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources: {}

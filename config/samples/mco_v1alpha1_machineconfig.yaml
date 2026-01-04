@@ -1,0 +1,51 @@
+# Example MachineConfig for NTP configuration
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfig
+metadata:
+  name: chrony-config
+  labels:
+    mco.in-cloud.io/pool: worker
+spec:
+  priority: 50
+  files:
+    - path: /etc/chrony.conf
+      content: |
+        # Chrony configuration managed by MCO
+        server ntp.example.com iburst
+        driftfile /var/lib/chrony/drift
+        makestep 1.0 3
+        rtcsync
+        logdir /var/log/chrony
+      mode: 420  # 0644
+      owner: "root:root"
+      state: present
+  systemd:
+    units:
+      - name: chronyd.service
+        enabled: true
+        state: started
+  reboot:
+    required: false
+---
+# Example MachineConfig for kernel parameters
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfig
+metadata:
+  name: sysctl-config
+  labels:
+    mco.in-cloud.io/pool: worker
+spec:
+  priority: 40
+  files:
+    - path: /etc/sysctl.d/99-mco.conf
+      content: |
+        # Kernel parameters managed by MCO
+        net.ipv4.ip_forward = 1
+        net.bridge.bridge-nf-call-iptables = 1
+        vm.swappiness = 10
+      mode: 420
+      owner: "root:root"
+      state: present
+  reboot:
+    required: true
+    reason: "Kernel parameters require reboot to take effect"

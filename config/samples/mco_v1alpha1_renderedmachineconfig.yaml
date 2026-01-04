@@ -1,0 +1,48 @@
+# Example RenderedMachineConfig (normally created by controller, not manually)
+# This is for reference only - RMCs are immutable snapshots
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: RenderedMachineConfig
+metadata:
+  name: rendered-worker-a1b2c3d4e5
+  labels:
+    mco.in-cloud.io/pool: worker
+spec:
+  poolName: worker
+  revision: a1b2c3d4e5
+  configHash: a1b2c3d4e5f6789012345678901234567890123456789012345678901234abcd
+  config:
+    files:
+      - path: /etc/chrony.conf
+        content: |
+          # Chrony configuration managed by MCO
+          server ntp.example.com iburst
+          driftfile /var/lib/chrony/drift
+          makestep 1.0 3
+          rtcsync
+          logdir /var/log/chrony
+        mode: 420
+        owner: "root:root"
+        state: present
+      - path: /etc/sysctl.d/99-mco.conf
+        content: |
+          # Kernel parameters managed by MCO
+          net.ipv4.ip_forward = 1
+          net.bridge.bridge-nf-call-iptables = 1
+          vm.swappiness = 10
+        mode: 420
+        owner: "root:root"
+        state: present
+    systemd:
+      units:
+        - name: chronyd.service
+          enabled: true
+          state: started
+  sources:
+    - name: sysctl-config
+      priority: 40
+    - name: chrony-config
+      priority: 50
+  reboot:
+    required: true
+    strategy: Never
+    minIntervalSeconds: 1800

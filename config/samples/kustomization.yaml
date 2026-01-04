@@ -1,0 +1,6 @@
+# Sample resources for MCO Lite
+resources:
+- mco_v1alpha1_machineconfig.yaml
+- mco_v1alpha1_machineconfigpool.yaml
+# Note: RenderedMachineConfig is normally created by controller
+# - mco_v1alpha1_renderedmachineconfig.yaml

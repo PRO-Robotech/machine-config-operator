@@ -1,0 +1,240 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: renderedmachineconfigs.mco.in-cloud.io
+spec:
+  group: mco.in-cloud.io
+  names:
+    kind: RenderedMachineConfig
+    listKind: RenderedMachineConfigList
+    plural: renderedmachineconfigs
+    shortNames:
+    - rmc
+    singular: renderedmachineconfig
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.poolName
+      name: Pool
+      type: string
+    - jsonPath: .spec.revision
+      name: Revision
+      type: string
+    - jsonPath: .spec.reboot.required
+      name: Reboot
+      type: boolean
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          RenderedMachineConfig is an immutable snapshot of merged MachineConfigs.
+          It represents the complete configuration that should be applied to nodes
+          in a MachineConfigPool. Once created, it is never modified - new configurations
+          result in new RenderedMachineConfig objects.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              RenderedMachineConfigSpec defines the desired state of RenderedMachineConfig.
+              This spec is immutable once created.
+            properties:
+              config:
+                description: Config contains the merged configuration to be applied.
+                properties:
+                  files:
+                    description: |-
+                      Files is the merged list of files to manage on the host.
+                      Files are sorted by path and deduplicated (higher priority wins).
+                    items:
+                      description: FileSpec defines a file to be managed on the host.
+                      properties:
+                        content:
+                          description: Content is the file content. Required when
+                            state=present.
+                          maxLength: 1048576
+                          type: string
+                        mode:
+                          default: 420
+                          description: Mode is the Unix file permissions (e.g., 0644).
+                          maximum: 4095
+                          minimum: 0
+                          type: integer
+                        owner:
+                          default: root:root
+                          description: Owner is the file owner in format "user:group"
+                            or "uid:gid".
+                          pattern: ^[a-zA-Z0-9_-]+:[a-zA-Z0-9_-]+$|^[0-9]+:[0-9]+$
+                          type: string
+                        path:
+                          description: Path is the absolute path to the file on the
+                            host.
+                          pattern: ^/.*
+                          type: string
+                        state:
+                          default: present
+                          description: 'State is the desired state of the file: present
+                            or absent.'
+                          enum:
+                          - present
+                          - absent
+                          type: string
+                      required:
+                      - path
+                      type: object
+                    type: array
+                  systemd:
+                    description: |-
+                      Systemd is the merged systemd configuration.
+                      Units are deduplicated by name (higher priority wins).
+                    properties:
+                      units:
+                        description: Units is the list of systemd units to manage.
+                        items:
+                          description: UnitSpec defines a systemd unit to be managed.
+                          properties:
+                            enabled:
+                              description: Enabled sets whether the unit should start
+                                at boot.
+                              type: boolean
+                            mask:
+                              default: false
+                              description: Mask completely disables the unit (cannot
+                                be started).
+                              type: boolean
+                            name:
+                              description: Name is the unit name (e.g., "nginx.service").
+                              pattern: ^[a-zA-Z0-9@._-]+\.(service|socket|timer|mount|target)$
+                              type: string
+                            state:
+                              description: 'State is the desired runtime state: started,
+                                stopped, restarted, reloaded.'
+                              enum:
+                              - started
+                              - stopped
+                              - restarted
+                              - reloaded
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                    type: object
+                type: object
+              configHash:
+                description: |-
+                  ConfigHash is the full SHA256 hash of the canonical configuration.
+                  Used for collision detection and exact matching.
+                pattern: ^[a-f0-9]{64}$
+                type: string
+              poolName:
+                description: PoolName is the name of the MachineConfigPool this RMC
+                  belongs to.
+                type: string
+              reboot:
+                description: |-
+                  Reboot contains the legacy reboot configuration for this rendered config.
+                  This is the OR of all source MachineConfigs' reboot.required fields.
+                  Used for first apply and fallback scenarios.
+                properties:
+                  minIntervalSeconds:
+                    description: MinIntervalSeconds is the minimum time between reboots
+                      from the pool.
+                    type: integer
+                  required:
+                    description: |-
+                      Required indicates whether a reboot is needed after applying this config.
+                      This is the OR of all source MachineConfigs' reboot.required fields.
+                    type: boolean
+                  strategy:
+                    description: Strategy is the reboot strategy from the MachineConfigPool.
+                    enum:
+                    - Never
+                    - IfRequired
+                    type: string
+                required:
+                - minIntervalSeconds
+                - required
+                - strategy
+                type: object
+              rebootRequirements:
+                description: |-
+                  RebootRequirements contains per-file and per-unit reboot requirements.
+                  Used by the Agent for diff-based reboot determination when transitioning
+                  from one RMC to another. This field is populated by the Renderer based
+                  on each source MachineConfig's reboot.required setting.
+                properties:
+                  files:
+                    additionalProperties:
+                      type: boolean
+                    description: |-
+                      Files maps file paths to their reboot requirements.
+                      Key: absolute file path (e.g., "/etc/sysctl.d/99-custom.conf")
+                      Value: true if reboot is required when this file changes
+                    type: object
+                  units:
+                    additionalProperties:
+                      type: boolean
+                    description: |-
+                      Units maps systemd unit names to their reboot requirements.
+                      Key: unit name (e.g., "containerd.service")
+                      Value: true if reboot is required when this unit changes
+                    type: object
+                type: object
+              revision:
+                description: |-
+                  Revision is a short identifier (first 10 characters of the config hash).
+                  Used for display and quick identification.
+                maxLength: 10
+                type: string
+              sources:
+                description: |-
+                  Sources lists the MachineConfigs that were merged to create this RMC.
+                  Ordered by priority (lowest first).
+                items:
+                  description: ConfigSource identifies a MachineConfig that contributed
+                    to this render.
+                  properties:
+                    name:
+                      description: Name is the MachineConfig name.
+                      type: string
+                    priority:
+                      description: Priority is the priority value from the MachineConfig.
+                      type: integer
+                  required:
+                  - name
+                  - priority
+                  type: object
+                type: array
+            required:
+            - config
+            - configHash
+            - poolName
+            - reboot
+            - revision
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources: {}

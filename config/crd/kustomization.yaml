@@ -1,0 +1,7 @@
+# This kustomization.yaml is not intended to be run by itself,
+# since it depends on service name and target namespace.
+# It should be run as part of config/default
+resources:
+- bases/mco.in-cloud.io_machineconfigs.yaml
+- bases/mco.in-cloud.io_machineconfigpools.yaml
+- bases/mco.in-cloud.io_renderedmachineconfigs.yaml

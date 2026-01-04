@@ -1,0 +1,222 @@
+# =============================================================================
+# Systemd Units Management Examples
+# =============================================================================
+#
+# This example demonstrates various systemd operations.
+#
+# What it does:
+#   - Enable and start services
+#   - Disable and stop services
+#   - Mask services (completely disable)
+#   - Restart/reload services
+#
+# Prerequisites:
+#   - MachineConfigPool "worker" must exist
+#   - Referenced services must be installed on nodes
+#
+# Apply:
+#   kubectl apply -f 04-systemd-units.yaml
+#
+# Verify:
+#   minikube ssh "systemctl status chronyd"
+#   minikube ssh "systemctl is-enabled chronyd"
+#
+# =============================================================================
+
+---
+# =============================================================================
+# Enable and Start Services
+# =============================================================================
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfig
+metadata:
+  name: systemd-enable-services
+  labels:
+    mco.in-cloud.io/pool: worker
+spec:
+  priority: 50
+
+  systemd:
+    units:
+      # ---------------------------------------------------------
+      # Enable and start NTP
+      # ---------------------------------------------------------
+      - name: chronyd.service
+        # Enable: systemctl enable chronyd
+        # Starts at boot
+        enabled: true
+        # State: systemctl start chronyd
+        # Currently running
+        state: started
+
+      # ---------------------------------------------------------
+      # Enable and start Docker socket
+      # ---------------------------------------------------------
+      - name: docker.socket
+        enabled: true
+        state: started
+
+      # ---------------------------------------------------------
+      # Enable timer (for scheduled tasks)
+      # ---------------------------------------------------------
+      - name: fstrim.timer
+        enabled: true
+        state: started
+
+  reboot:
+    required: false
+
+---
+# =============================================================================
+# Disable and Stop Services
+# =============================================================================
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfig
+metadata:
+  name: systemd-disable-services
+  labels:
+    mco.in-cloud.io/pool: worker
+spec:
+  priority: 50
+
+  systemd:
+    units:
+      # ---------------------------------------------------------
+      # Disable unused services
+      # ---------------------------------------------------------
+      - name: cups.service
+        # Disable: systemctl disable cups
+        # Won't start at boot
+        enabled: false
+        # Stop: systemctl stop cups
+        # Not running
+        state: stopped
+
+      - name: bluetooth.service
+        enabled: false
+        state: stopped
+
+      - name: avahi-daemon.service
+        enabled: false
+        state: stopped
+
+  reboot:
+    required: false
+
+---
+# =============================================================================
+# Mask Services (Complete Disable)
+# =============================================================================
+# Masked services cannot be started even manually
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfig
+metadata:
+  name: systemd-mask-services
+  labels:
+    mco.in-cloud.io/pool: worker
+spec:
+  priority: 50
+
+  systemd:
+    units:
+      # ---------------------------------------------------------
+      # Completely disable debug shell
+      # ---------------------------------------------------------
+      - name: debug-shell.service
+        # Mask: systemctl mask debug-shell
+        # Creates symlink to /dev/null
+        # Cannot be started by any means
+        mask: true
+
+      # ---------------------------------------------------------
+      # Disable remote shell for security
+      # ---------------------------------------------------------
+      - name: rsh.socket
+        mask: true
+
+      - name: rlogin.socket
+        mask: true
+
+      - name: rexec.socket
+        mask: true
+
+  reboot:
+    required: false
+
+---
+# =============================================================================
+# Restart/Reload Services
+# =============================================================================
+# Use after changing configuration files
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfig
+metadata:
+  name: systemd-restart-services
+  labels:
+    mco.in-cloud.io/pool: worker
+spec:
+  priority: 60
+
+  files:
+    # Configuration file that requires service restart
+    - path: /etc/rsyslog.conf
+      content: |
+        # Rsyslog configuration
+        module(load="imuxsock")
+        module(load="imjournal")
+
+        *.info;mail.none;authpriv.none;cron.none    /var/log/messages
+        authpriv.*                                   /var/log/secure
+        mail.*                                       /var/log/maillog
+        cron.*                                       /var/log/cron
+        *.emerg                                      :omusrmsg:*
+        local7.*                                     /var/log/boot.log
+      mode: 420
+      owner: "root:root"
+
+  systemd:
+    units:
+      # ---------------------------------------------------------
+      # Restart rsyslog to pick up new config
+      # ---------------------------------------------------------
+      - name: rsyslog.service
+        enabled: true
+        # Restart: systemctl restart rsyslog
+        # Stops and starts the service
+        state: restarted
+
+      # ---------------------------------------------------------
+      # Reload (if service supports it)
+      # ---------------------------------------------------------
+      # Note: reload is gentler than restart
+      # Service stays running, just reloads config
+      # Use when service supports SIGHUP or reload command
+      # - name: nginx.service
+      #   state: reloaded
+
+  reboot:
+    required: false
+
+# =============================================================================
+# Systemd State Reference
+# =============================================================================
+#
+# | State     | Action                    | When to use                    |
+# |-----------|---------------------------|--------------------------------|
+# | started   | systemctl start           | Ensure service is running      |
+# | stopped   | systemctl stop            | Ensure service is not running  |
+# | restarted | systemctl restart         | Apply new config, fresh start  |
+# | reloaded  | systemctl reload          | Apply new config, keep state   |
+#
+# | enabled   | Action                    |
+# |-----------|---------------------------|
+# | true      | systemctl enable          |
+# | false     | systemctl disable         |
+# | null/omit | Don't change enable state |
+#
+# | mask      | Action                    |
+# |-----------|---------------------------|
+# | true      | systemctl mask            |
+# | false     | Don't mask (or unmask)    |
+#
+# =============================================================================

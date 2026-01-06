@@ -50,6 +50,9 @@ const (
 	// DrainStartedAt contains the timestamp when drain started.
 	DrainStartedAt = Prefix + "drain-started-at"
 
+	// DrainRetryCount contains the number of drain retry attempts.
+	DrainRetryCount = Prefix + "drain-retry-count"
+
 	// Control annotations (set by user/operator).
 
 	// Paused is "true" to exclude the node from rollout.

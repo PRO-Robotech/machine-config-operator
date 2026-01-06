@@ -167,6 +167,9 @@ const (
 
 	// ConditionPoolOverlap indicates nodes in this pool also match other pools.
 	ConditionPoolOverlap string = "PoolOverlap"
+
+	// ConditionDrainStuck indicates drain has been stuck for longer than timeout.
+	ConditionDrainStuck string = "DrainStuck"
 )
 
 // +kubebuilder:object:root=true

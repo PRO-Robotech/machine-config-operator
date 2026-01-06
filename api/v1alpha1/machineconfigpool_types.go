@@ -18,6 +18,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 // RolloutConfig defines rollout behavior for the pool.
@@ -38,6 +39,12 @@ type RolloutConfig struct {
 	// +kubebuilder:default=600
 	// +optional
 	ApplyTimeoutSeconds int `json:"applyTimeoutSeconds,omitempty"`
+
+	// MaxUnavailable is the maximum number of nodes that can be unavailable
+	// during an update. Value can be an absolute number (ex: 5) or a percentage
+	// of total nodes (ex: "10%"). Defaults to 1.
+	// +optional
+	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
 }
 
 // RebootPolicy defines the reboot behavior for nodes in the pool.

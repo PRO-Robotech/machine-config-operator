@@ -216,6 +216,15 @@ spec:
                     maximum: 3600
                     minimum: 0
                     type: integer
+                  maxUnavailable:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      MaxUnavailable is the maximum number of nodes that can be unavailable
+                      during an update. Value can be an absolute number (ex: 5) or a percentage
+                      of total nodes (ex: "10%"). Defaults to 1.
+                    x-kubernetes-int-or-string: true
                 type: object
             type: object
           status:

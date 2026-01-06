@@ -44,6 +44,12 @@ const (
 	// RebootPending is "true" if a reboot is needed but blocked by policy.
 	RebootPending = Prefix + "reboot-pending"
 
+	// Cordoned is "true" if the node was cordoned by MCO for update.
+	Cordoned = Prefix + "cordoned"
+
+	// DrainStartedAt contains the timestamp when drain started.
+	DrainStartedAt = Prefix + "drain-started-at"
+
 	// Control annotations (set by user/operator).
 
 	// Paused is "true" to exclude the node from rollout.

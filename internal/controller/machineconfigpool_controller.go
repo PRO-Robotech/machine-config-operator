@@ -159,6 +159,9 @@ func (r *MachineConfigPoolReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		ApplyStatusToPool(pool, status)
 		// Apply overlap condition (adds PoolOverlap and potentially Degraded)
 		ApplyOverlapCondition(pool, overlap)
+		// Update metrics
+		UpdateCordonedNodesGauge(pool.Name, status.CordonedMachineCount)
+		UpdateDrainingNodesGauge(pool.Name, status.DrainingMachineCount)
 		return r.Status().Update(ctx, pool)
 	}); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to update pool status: %w", err)

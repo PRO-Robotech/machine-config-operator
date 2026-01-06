@@ -61,6 +61,7 @@ func ProcessNodeUpdate(
 			}
 			if retry.SetDrainStuck {
 				result.DrainStuckMsg = fmt.Sprintf("Node %s drain timeout: %v", node.Name, err)
+				RecordDrainStuck(pool.Name)
 			}
 			return result
 		}
@@ -79,6 +80,13 @@ func ProcessNodeUpdate(
 	}
 
 	if ShouldUncordon(node, targetRevision) {
+		drainStarted := annotations.GetAnnotation(node.Annotations, annotations.DrainStartedAt)
+		if drainStarted != "" {
+			if startTime, err := time.Parse(time.RFC3339, drainStarted); err == nil {
+				duration := time.Since(startTime).Seconds()
+				RecordDrainDuration(pool.Name, node.Name, duration)
+			}
+		}
 		if err := UncordonNode(ctx, c, node); err != nil {
 			logger.Error(err, "failed to uncordon node", "node", node.Name)
 			return NodeUpdateResult{Result: ctrl.Result{RequeueAfter: 5 * time.Second}}

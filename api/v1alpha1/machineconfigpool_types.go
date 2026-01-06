@@ -142,6 +142,12 @@ type MachineConfigPoolStatus struct {
 	// PendingRebootCount is the number of nodes waiting for a reboot.
 	PendingRebootCount int `json:"pendingRebootCount"`
 
+	// CordonedMachineCount is the number of nodes that are cordoned.
+	CordonedMachineCount int `json:"cordonedMachineCount"`
+
+	// DrainingMachineCount is the number of nodes that are being drained.
+	DrainingMachineCount int `json:"drainingMachineCount"`
+
 	// Conditions represent the latest available observations of the pool's state.
 	// +optional
 	// +patchMergeKey=type

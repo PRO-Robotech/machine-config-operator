@@ -38,6 +38,8 @@ type AggregatedStatus struct {
 	DegradedMachineCount    int
 	UnavailableMachineCount int
 	PendingRebootCount      int
+	CordonedMachineCount    int
+	DrainingMachineCount    int
 	Conditions              []metav1.Condition
 }
 
@@ -85,6 +87,16 @@ func AggregateStatus(target string, nodes []corev1.Node) *AggregatedStatus {
 
 		if rebootPending {
 			status.PendingRebootCount++
+		}
+
+		cordoned := annotations.GetBoolAnnotation(nodeAnnotations, annotations.Cordoned)
+		if cordoned || node.Spec.Unschedulable {
+			status.CordonedMachineCount++
+		}
+
+		drainStarted := annotations.GetAnnotation(nodeAnnotations, annotations.DrainStartedAt)
+		if drainStarted != "" {
+			status.DrainingMachineCount++
 		}
 	}
 
@@ -196,6 +208,8 @@ func ApplyStatusToPool(pool *mcov1alpha1.MachineConfigPool, status *AggregatedSt
 	pool.Status.DegradedMachineCount = status.DegradedMachineCount
 	pool.Status.UnavailableMachineCount = status.UnavailableMachineCount
 	pool.Status.PendingRebootCount = status.PendingRebootCount
+	pool.Status.CordonedMachineCount = status.CordonedMachineCount
+	pool.Status.DrainingMachineCount = status.DrainingMachineCount
 
 	pool.Status.Conditions = mergeConditions(pool.Status.Conditions, status.Conditions)
 }

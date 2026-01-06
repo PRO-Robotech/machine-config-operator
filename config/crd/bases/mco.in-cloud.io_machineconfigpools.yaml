@@ -291,6 +291,10 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              cordonedMachineCount:
+                description: CordonedMachineCount is the number of nodes that are
+                  cordoned.
+                type: integer
               currentRevision:
                 description: |-
                   CurrentRevision is the most common revision among nodes in the pool.
@@ -299,6 +303,10 @@ spec:
               degradedMachineCount:
                 description: DegradedMachineCount is the number of nodes with state
                   == error.
+                type: integer
+              drainingMachineCount:
+                description: DrainingMachineCount is the number of nodes that are
+                  being drained.
                 type: integer
               lastSuccessfulRevision:
                 description: |-
@@ -334,7 +342,9 @@ spec:
                   == applying.
                 type: integer
             required:
+            - cordonedMachineCount
             - degradedMachineCount
+            - drainingMachineCount
             - machineCount
             - pendingRebootCount
             - readyMachineCount

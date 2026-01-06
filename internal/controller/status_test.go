@@ -636,3 +636,144 @@ func TestSetDegradedForOverlap_DoesNotOverrideExistingDegraded(t *testing.T) {
 	}
 	t.Error("Degraded condition not found")
 }
+
+func makeCordonedNode(name string, drainStartedAt string) corev1.Node {
+	node := corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Annotations: make(map[string]string),
+		},
+	}
+	node.Annotations[annotations.Cordoned] = "true"
+	node.Spec.Unschedulable = true
+	if drainStartedAt != "" {
+		node.Annotations[annotations.DrainStartedAt] = drainStartedAt
+	}
+	return node
+}
+
+func TestAggregateStatus_NoCordoned(t *testing.T) {
+	nodes := []corev1.Node{
+		makeNode("worker-1", "workers-abc", annotations.StateDone),
+		makeNode("worker-2", "workers-abc", annotations.StateDone),
+	}
+
+	status := AggregateStatus("workers-abc", nodes)
+
+	if status.CordonedMachineCount != 0 {
+		t.Errorf("CordonedMachineCount = %d, want 0", status.CordonedMachineCount)
+	}
+	if status.DrainingMachineCount != 0 {
+		t.Errorf("DrainingMachineCount = %d, want 0", status.DrainingMachineCount)
+	}
+}
+
+func TestAggregateStatus_OneCordoned(t *testing.T) {
+	nodes := []corev1.Node{
+		makeCordonedNode("worker-1", ""),
+		makeNode("worker-2", "workers-abc", annotations.StateDone),
+	}
+
+	status := AggregateStatus("workers-abc", nodes)
+
+	if status.CordonedMachineCount != 1 {
+		t.Errorf("CordonedMachineCount = %d, want 1", status.CordonedMachineCount)
+	}
+	if status.DrainingMachineCount != 0 {
+		t.Errorf("DrainingMachineCount = %d, want 0", status.DrainingMachineCount)
+	}
+}
+
+func TestAggregateStatus_MultipleCordoned(t *testing.T) {
+	nodes := []corev1.Node{
+		makeCordonedNode("worker-1", ""),
+		makeCordonedNode("worker-2", ""),
+		makeCordonedNode("worker-3", ""),
+		makeNode("worker-4", "workers-abc", annotations.StateDone),
+	}
+
+	status := AggregateStatus("workers-abc", nodes)
+
+	if status.CordonedMachineCount != 3 {
+		t.Errorf("CordonedMachineCount = %d, want 3", status.CordonedMachineCount)
+	}
+}
+
+func TestAggregateStatus_Draining(t *testing.T) {
+	drainStarted := time.Now().Format(time.RFC3339)
+	nodes := []corev1.Node{
+		makeCordonedNode("worker-1", drainStarted),
+		makeCordonedNode("worker-2", drainStarted),
+		makeNode("worker-3", "workers-abc", annotations.StateDone),
+	}
+
+	status := AggregateStatus("workers-abc", nodes)
+
+	if status.CordonedMachineCount != 2 {
+		t.Errorf("CordonedMachineCount = %d, want 2", status.CordonedMachineCount)
+	}
+	if status.DrainingMachineCount != 2 {
+		t.Errorf("DrainingMachineCount = %d, want 2", status.DrainingMachineCount)
+	}
+}
+
+func TestAggregateStatus_MixedCordonDrain(t *testing.T) {
+	drainStarted := time.Now().Format(time.RFC3339)
+	nodes := []corev1.Node{
+		makeCordonedNode("worker-1", drainStarted), // cordoned + draining
+		makeCordonedNode("worker-2", ""),           // cordoned only
+		makeNode("worker-3", "workers-abc", annotations.StateDone),
+	}
+
+	status := AggregateStatus("workers-abc", nodes)
+
+	if status.CordonedMachineCount != 2 {
+		t.Errorf("CordonedMachineCount = %d, want 2", status.CordonedMachineCount)
+	}
+	if status.DrainingMachineCount != 1 {
+		t.Errorf("DrainingMachineCount = %d, want 1", status.DrainingMachineCount)
+	}
+}
+
+func TestAggregateStatus_UnschedulableWithoutAnnotation(t *testing.T) {
+	node := corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "worker-1",
+			Annotations: make(map[string]string),
+		},
+		Spec: corev1.NodeSpec{
+			Unschedulable: true, // manually cordoned without annotation
+		},
+	}
+	nodes := []corev1.Node{node}
+
+	status := AggregateStatus("workers-abc", nodes)
+
+	if status.CordonedMachineCount != 1 {
+		t.Errorf("CordonedMachineCount = %d, want 1 (unschedulable)", status.CordonedMachineCount)
+	}
+}
+
+func TestApplyStatusToPool_NewFields(t *testing.T) {
+	pool := &mcov1alpha1.MachineConfigPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+	}
+
+	status := &AggregatedStatus{
+		TargetRevision:       "workers-new",
+		CurrentRevision:      "workers-old",
+		MachineCount:         5,
+		CordonedMachineCount: 2,
+		DrainingMachineCount: 1,
+		Conditions:           []metav1.Condition{},
+	}
+
+	ApplyStatusToPool(pool, status)
+
+	if pool.Status.CordonedMachineCount != 2 {
+		t.Errorf("CordonedMachineCount = %d, want 2", pool.Status.CordonedMachineCount)
+	}
+	if pool.Status.DrainingMachineCount != 1 {
+		t.Errorf("DrainingMachineCount = %d, want 1", pool.Status.DrainingMachineCount)
+	}
+}

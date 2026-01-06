@@ -53,6 +53,39 @@ var (
 		},
 		[]string{"pool"},
 	)
+
+	drainDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "mco_drain_duration_seconds",
+			Help:    "Time taken to drain a node",
+			Buckets: prometheus.ExponentialBuckets(10, 2, 10), // 10s to ~2.8h
+		},
+		[]string{"pool", "node"},
+	)
+
+	drainStuckTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "mco_drain_stuck_total",
+			Help: "Total number of drain stuck events (timeout exceeded)",
+		},
+		[]string{"pool"},
+	)
+
+	cordonedNodes = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "mco_cordoned_nodes",
+			Help: "Current number of cordoned nodes per pool",
+		},
+		[]string{"pool"},
+	)
+
+	drainingNodes = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "mco_draining_nodes",
+			Help: "Current number of nodes being drained per pool",
+		},
+		[]string{"pool"},
+	)
 )
 
 func init() {
@@ -61,6 +94,10 @@ func init() {
 		poolOverlapConflictsTotal,
 		poolReconcileTotal,
 		poolReconcileDuration,
+		drainDuration,
+		drainStuckTotal,
+		cordonedNodes,
+		drainingNodes,
 	)
 }
 
@@ -101,4 +138,22 @@ func RecordReconcileDuration(pool string, durationSeconds float64) {
 
 func ResetPoolMetrics(pool string) {
 	poolOverlapNodesTotal.DeleteLabelValues(pool)
+	cordonedNodes.DeleteLabelValues(pool)
+	drainingNodes.DeleteLabelValues(pool)
+}
+
+func RecordDrainDuration(pool, node string, durationSeconds float64) {
+	drainDuration.WithLabelValues(pool, node).Observe(durationSeconds)
+}
+
+func RecordDrainStuck(pool string) {
+	drainStuckTotal.WithLabelValues(pool).Inc()
+}
+
+func UpdateCordonedNodesGauge(pool string, count int) {
+	cordonedNodes.WithLabelValues(pool).Set(float64(count))
+}
+
+func UpdateDrainingNodesGauge(pool string, count int) {
+	drainingNodes.WithLabelValues(pool).Set(float64(count))
 }

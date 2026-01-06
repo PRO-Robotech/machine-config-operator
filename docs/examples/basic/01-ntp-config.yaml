@@ -1,0 +1,73 @@
+# =============================================================================
+# NTP Configuration via Chrony
+# =============================================================================
+#
+# This example configures NTP time synchronization using chrony.
+#
+# What it does:
+#   - Creates /etc/chrony.conf with NTP servers
+#   - Enables and starts chronyd.service
+#
+# Prerequisites:
+#   - chrony package must be installed on the node
+#   - MachineConfigPool "worker" must exist
+#
+# Apply:
+#   kubectl apply -f 01-ntp-config.yaml
+#
+# Verify:
+#   kubectl get mc ntp-config
+#   minikube ssh "cat /etc/chrony.conf"
+#   minikube ssh "systemctl status chronyd"
+#
+# =============================================================================
+
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfig
+metadata:
+  name: ntp-config
+  labels:
+    # This label links MC to the "worker" pool
+    mco.in-cloud.io/pool: worker
+spec:
+  # Priority determines merge order (0-99999)
+  # Higher priority wins on conflicts
+  priority: 50
+
+  files:
+    - path: /etc/chrony.conf
+      content: |
+        # Managed by MCO Lite - do not edit manually
+        # NTP servers
+        server time.google.com iburst
+        server time.cloudflare.com iburst
+        server ntp.ubuntu.com iburst
+
+        # Record the rate at which the system clock gains/losses time
+        driftfile /var/lib/chrony/drift
+
+        # Allow the system clock to be stepped in the first three updates
+        # if its offset is larger than 1 second
+        makestep 1.0 3
+
+        # Enable kernel synchronization of the real-time clock (RTC)
+        rtcsync
+
+        # Specify directory for log files
+        logdir /var/log/chrony
+      # Mode in decimal: 420 = 0644 (rw-r--r--)
+      mode: 420
+      owner: "root:root"
+      state: present
+
+  systemd:
+    units:
+      - name: chronyd.service
+        # Start at boot
+        enabled: true
+        # Current runtime state
+        state: started
+
+  reboot:
+    # NTP config doesn't require reboot
+    required: false

@@ -1,0 +1,43 @@
+# Example MachineConfigPool for worker nodes
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfigPool
+metadata:
+  name: worker
+spec:
+  nodeSelector:
+    matchLabels:
+      node-role.kubernetes.io/worker: ""
+  machineConfigSelector:
+    matchLabels:
+      mco.in-cloud.io/pool: worker
+  rollout:
+    debounceSeconds: 30
+    applyTimeoutSeconds: 600
+  reboot:
+    strategy: Never
+    minIntervalSeconds: 1800
+  revisionHistory:
+    limit: 5
+  paused: false
+---
+# Example MachineConfigPool for control plane nodes
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfigPool
+metadata:
+  name: master
+spec:
+  nodeSelector:
+    matchLabels:
+      node-role.kubernetes.io/control-plane: ""
+  machineConfigSelector:
+    matchLabels:
+      mco.in-cloud.io/pool: master
+  rollout:
+    debounceSeconds: 60
+    applyTimeoutSeconds: 900
+  reboot:
+    strategy: IfRequired
+    minIntervalSeconds: 3600
+  revisionHistory:
+    limit: 10
+  paused: false

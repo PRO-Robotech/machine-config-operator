@@ -1,0 +1,340 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: machineconfigpools.mco.in-cloud.io
+spec:
+  group: mco.in-cloud.io
+  names:
+    kind: MachineConfigPool
+    listKind: MachineConfigPoolList
+    plural: machineconfigpools
+    shortNames:
+    - mcp
+    singular: machineconfigpool
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.targetRevision
+      name: Target
+      type: string
+    - jsonPath: .status.currentRevision
+      name: Current
+      type: string
+    - jsonPath: .status.readyMachineCount
+      name: Ready
+      type: integer
+    - jsonPath: .status.updatedMachineCount
+      name: Updated
+      type: integer
+    - jsonPath: .status.degradedMachineCount
+      name: Degraded
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          MachineConfigPool groups nodes and MachineConfigs together.
+          It defines which MachineConfigs apply to which nodes, and controls
+          the rollout behavior and reboot policy.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: MachineConfigPoolSpec defines the desired state of MachineConfigPool.
+            properties:
+              machineConfigSelector:
+                description: MachineConfigSelector selects MachineConfigs that apply
+                  to this pool.
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
+              nodeSelector:
+                description: NodeSelector selects nodes that belong to this pool.
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
+              paused:
+                default: false
+                description: |-
+                  Paused stops all reconciliation for this pool when set to true.
+                  No new RenderedMachineConfigs will be created and no nodes will be updated.
+                type: boolean
+              reboot:
+                description: Reboot defines the reboot policy for nodes in this pool.
+                properties:
+                  minIntervalSeconds:
+                    default: 1800
+                    description: |-
+                      MinIntervalSeconds is the minimum time between reboots for a single node.
+                      This prevents reboot storms when multiple configs requiring reboot are applied.
+                    minimum: 0
+                    type: integer
+                  strategy:
+                    default: Never
+                    description: |-
+                      Strategy determines when nodes are allowed to reboot.
+                      - Never: Nodes never reboot automatically (manual intervention required)
+                      - IfRequired: Nodes reboot when a MachineConfig requires it
+                    enum:
+                    - Never
+                    - IfRequired
+                    type: string
+                type: object
+              revisionHistory:
+                description: RevisionHistory defines how many old RenderedMachineConfigs
+                  to keep.
+                properties:
+                  limit:
+                    default: 5
+                    description: |-
+                      Limit is the maximum number of old RenderedMachineConfigs to retain.
+                      Set to 0 for unlimited retention.
+                    minimum: 0
+                    type: integer
+                type: object
+              rollout:
+                description: Rollout defines how configuration changes are rolled
+                  out to nodes.
+                properties:
+                  applyTimeoutSeconds:
+                    default: 600
+                    description: |-
+                      ApplyTimeoutSeconds is the maximum time to wait for a node to apply
+                      a configuration before marking it as degraded.
+                    maximum: 3600
+                    minimum: 60
+                    type: integer
+                  debounceSeconds:
+                    default: 30
+                    description: |-
+                      DebounceSeconds is the time to wait after a config change before
+                      rendering a new RenderedMachineConfig. This prevents rapid re-renders
+                      when multiple MachineConfigs are updated in sequence.
+                    maximum: 3600
+                    minimum: 0
+                    type: integer
+                type: object
+            type: object
+          status:
+            description: MachineConfigPoolStatus defines the observed state of MachineConfigPool.
+            properties:
+              conditions:
+                description: Conditions represent the latest available observations
+                  of the pool's state.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              currentRevision:
+                description: |-
+                  CurrentRevision is the most common revision among nodes in the pool.
+                  This represents the "current" state of the pool.
+                type: string
+              degradedMachineCount:
+                description: DegradedMachineCount is the number of nodes with state
+                  == error.
+                type: integer
+              lastSuccessfulRevision:
+                description: |-
+                  LastSuccessfulRevision is the last revision that was successfully
+                  applied to all nodes in the pool.
+                type: string
+              machineCount:
+                description: MachineCount is the total number of nodes in this pool.
+                type: integer
+              pendingRebootCount:
+                description: PendingRebootCount is the number of nodes waiting for
+                  a reboot.
+                type: integer
+              readyMachineCount:
+                description: ReadyMachineCount is the number of nodes with current
+                  == target AND state == done.
+                type: integer
+              targetRevision:
+                description: |-
+                  TargetRevision is the name of the RenderedMachineConfig that nodes
+                  should be converging to.
+                type: string
+              unavailableMachineCount:
+                description: UnavailableMachineCount is the number of nodes that are
+                  not ready.
+                type: integer
+              updatedMachineCount:
+                description: UpdatedMachineCount is the number of nodes with current
+                  == target.
+                type: integer
+              updatingMachineCount:
+                description: UpdatingMachineCount is the number of nodes with state
+                  == applying.
+                type: integer
+            required:
+            - degradedMachineCount
+            - machineCount
+            - pendingRebootCount
+            - readyMachineCount
+            - unavailableMachineCount
+            - updatedMachineCount
+            - updatingMachineCount
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

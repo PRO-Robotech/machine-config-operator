@@ -1,0 +1,149 @@
+# =============================================================================
+# Multiple Pools Example
+# =============================================================================
+#
+# This example shows how to configure different pools for different node roles.
+#
+# What it does:
+#   - Creates "master" pool for control-plane nodes
+#   - Creates "worker" pool for worker nodes
+#   - Each pool has different configuration
+#
+# Prerequisites:
+#   - Nodes with appropriate labels:
+#     - node-role.kubernetes.io/control-plane for master
+#     - node-role.kubernetes.io/worker for worker
+#
+# Apply:
+#   kubectl apply -f 01-multi-pool.yaml
+#
+# Verify:
+#   kubectl get mcp
+#   kubectl get mc
+#
+# =============================================================================
+
+---
+# =============================================================================
+# Pool: Master (Control Plane)
+# =============================================================================
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfigPool
+metadata:
+  name: master
+spec:
+  nodeSelector:
+    matchLabels:
+      node-role.kubernetes.io/control-plane: ""
+  machineConfigSelector:
+    matchLabels:
+      mco.in-cloud.io/pool: master
+  rollout:
+    # Longer debounce for control-plane
+    debounceSeconds: 60
+    # Longer timeout for critical nodes
+    applyTimeoutSeconds: 900
+  reboot:
+    # Control-plane can auto-reboot if needed
+    strategy: IfRequired
+    # But not more than once per hour
+    minIntervalSeconds: 3600
+  revisionHistory:
+    # Keep more history for control-plane
+    limit: 10
+  paused: false
+
+---
+# =============================================================================
+# Pool: Worker
+# =============================================================================
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfigPool
+metadata:
+  name: worker
+spec:
+  nodeSelector:
+    matchLabels:
+      node-role.kubernetes.io/worker: ""
+  machineConfigSelector:
+    matchLabels:
+      mco.in-cloud.io/pool: worker
+  rollout:
+    debounceSeconds: 30
+    applyTimeoutSeconds: 600
+  reboot:
+    # Workers don't auto-reboot
+    strategy: Never
+  revisionHistory:
+    limit: 5
+  paused: false
+
+---
+# =============================================================================
+# MachineConfig: Master-specific NTP
+# =============================================================================
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfig
+metadata:
+  name: master-ntp
+  labels:
+    # Only applies to master pool
+    mco.in-cloud.io/pool: master
+spec:
+  priority: 50
+  files:
+    - path: /etc/chrony.conf
+      content: |
+        # Control-plane NTP configuration
+        # Use more reliable NTP sources
+        server time.google.com iburst prefer
+        server time.cloudflare.com iburst
+        server time.windows.com iburst
+
+        driftfile /var/lib/chrony/drift
+        makestep 0.1 3
+        rtcsync
+        logdir /var/log/chrony
+      mode: 420
+      owner: "root:root"
+  systemd:
+    units:
+      - name: chronyd.service
+        enabled: true
+        state: started
+  reboot:
+    required: false
+
+---
+# =============================================================================
+# MachineConfig: Worker-specific NTP
+# =============================================================================
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfig
+metadata:
+  name: worker-ntp
+  labels:
+    # Only applies to worker pool
+    mco.in-cloud.io/pool: worker
+spec:
+  priority: 50
+  files:
+    - path: /etc/chrony.conf
+      content: |
+        # Worker NTP configuration
+        # Sync from control-plane or local NTP
+        server ntp.internal.example.com iburst
+        server time.google.com iburst
+
+        driftfile /var/lib/chrony/drift
+        makestep 1.0 3
+        rtcsync
+      mode: 420
+      owner: "root:root"
+  systemd:
+    units:
+      - name: chronyd.service
+        enabled: true
+        state: started
+  reboot:
+    required: false

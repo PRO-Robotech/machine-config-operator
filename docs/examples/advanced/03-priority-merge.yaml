@@ -1,0 +1,176 @@
+# =============================================================================
+# Priority and Merge Examples
+# =============================================================================
+#
+# This example demonstrates how multiple MachineConfigs are merged.
+#
+# Key concepts:
+#   - MCs are sorted by priority (lower first)
+#   - Higher priority OVERRIDES lower priority on conflicts
+#   - Files with same path: higher priority wins
+#   - Systemd units with same name: higher priority wins
+#
+# Merge order: priority 20 → 40 → 60 → 80
+# Winner on conflict: priority 80 (highest)
+#
+# Apply:
+#   kubectl apply -f 03-priority-merge.yaml
+#
+# Check merged result:
+#   kubectl get rmc -l mco.in-cloud.io/pool=worker -o yaml
+#
+# =============================================================================
+
+---
+# =============================================================================
+# Base configuration (priority: 20)
+# =============================================================================
+# This is the foundation. Other configs can override parts of it.
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfig
+metadata:
+  name: base-config
+  labels:
+    mco.in-cloud.io/pool: worker
+    layer: base
+spec:
+  # Lowest priority - applied first, can be overridden
+  priority: 20
+
+  files:
+    # Base sysctl settings
+    - path: /etc/sysctl.d/99-base.conf
+      content: |
+        # Base kernel settings
+        vm.swappiness = 30
+        net.ipv4.ip_forward = 0
+        net.core.somaxconn = 1024
+      mode: 420
+      owner: "root:root"
+
+    # Base app config
+    - path: /etc/myapp/config.conf
+      content: |
+        # Base configuration
+        log_level = info
+        max_connections = 100
+        timeout = 30
+      mode: 420
+      owner: "root:root"
+
+  reboot:
+    required: false
+
+---
+# =============================================================================
+# Network override (priority: 40)
+# =============================================================================
+# Overrides network-related settings from base
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfig
+metadata:
+  name: network-override
+  labels:
+    mco.in-cloud.io/pool: worker
+    layer: network
+spec:
+  # Higher than base - will override base network settings
+  priority: 40
+
+  files:
+    # Override sysctl with network-specific settings
+    # THIS FILE WILL REPLACE the one from base-config
+    - path: /etc/sysctl.d/99-base.conf
+      content: |
+        # Network-optimized kernel settings
+        vm.swappiness = 10
+        net.ipv4.ip_forward = 1
+        net.core.somaxconn = 65535
+        # Additional network settings
+        net.ipv4.tcp_max_syn_backlog = 65535
+        net.core.netdev_max_backlog = 65535
+      mode: 420
+      owner: "root:root"
+
+  reboot:
+    required: false
+
+---
+# =============================================================================
+# Application override (priority: 60)
+# =============================================================================
+# Overrides application settings
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfig
+metadata:
+  name: app-override
+  labels:
+    mco.in-cloud.io/pool: worker
+    layer: application
+spec:
+  priority: 60
+
+  files:
+    # Override app config
+    # THIS FILE WILL REPLACE the one from base-config
+    - path: /etc/myapp/config.conf
+      content: |
+        # Production configuration
+        log_level = warn
+        max_connections = 10000
+        timeout = 60
+        # Additional production settings
+        enable_metrics = true
+        metrics_port = 9090
+      mode: 420
+      owner: "root:root"
+
+  reboot:
+    required: false
+
+---
+# =============================================================================
+# Emergency override (priority: 80)
+# =============================================================================
+# Highest priority - use for emergency patches or critical overrides
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfig
+metadata:
+  name: emergency-override
+  labels:
+    mco.in-cloud.io/pool: worker
+    layer: emergency
+spec:
+  # Highest priority - overrides everything
+  priority: 80
+
+  files:
+    # Emergency hotfix file (doesn't conflict with others)
+    - path: /etc/myapp/hotfix.conf
+      content: |
+        # Emergency hotfix
+        # Applied: 2025-01-04
+        # Issue: TICKET-12345
+        workaround_enabled = true
+      mode: 420
+      owner: "root:root"
+
+  reboot:
+    required: false
+
+# =============================================================================
+# Result after merge (RenderedMachineConfig):
+# =============================================================================
+#
+# Files in RMC:
+#   /etc/myapp/config.conf     ← from app-override (priority 60)
+#   /etc/myapp/hotfix.conf     ← from emergency-override (priority 80)
+#   /etc/sysctl.d/99-base.conf ← from network-override (priority 40)
+#
+# Sources in RMC:
+#   - base-config (priority: 20)
+#   - network-override (priority: 40)
+#   - app-override (priority: 60)
+#   - emergency-override (priority: 80)
+#
+# =============================================================================

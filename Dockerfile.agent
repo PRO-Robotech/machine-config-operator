@@ -1,0 +1,49 @@
+# Build the agent binary
+FROM golang:1.24 AS builder
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /workspace
+
+# Copy the Go Modules manifests
+COPY go.mod go.mod
+COPY go.sum go.sum
+
+# Cache deps before building and copying source so that we don't need to re-download as much
+# and so that source changes don't invalidate our downloaded layer
+RUN go mod download
+
+# Copy the Go source (relies on .dockerignore to filter)
+COPY api/ api/
+COPY cmd/agent/ cmd/agent/
+COPY internal/ internal/
+COPY pkg/ pkg/
+
+# Build with optimizations for smaller binary
+# -w: omit DWARF symbol table
+# -s: omit symbol table and debug info
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
+    -ldflags="-w -s" \
+    -a -o agent ./cmd/agent
+
+# Runtime stage - Alpine with D-Bus for systemd communication
+# Agent needs dbus to communicate with host's systemd over D-Bus socket
+FROM alpine:3.21
+
+# Install D-Bus client libraries (needed for go-systemd to work)
+# ca-certificates for any TLS communication with API server
+RUN apk add --no-cache \
+    dbus \
+    ca-certificates
+
+WORKDIR /
+
+COPY --from=builder /workspace/agent .
+
+# Agent runs as root - required for:
+# - Writing to host filesystem (/etc, /var)
+# - Communicating with host systemd via D-Bus
+# - Managing systemd units
+USER 0:0
+
+ENTRYPOINT ["/agent"]

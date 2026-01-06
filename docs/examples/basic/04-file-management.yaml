@@ -1,0 +1,117 @@
+# =============================================================================
+# File Management Examples
+# =============================================================================
+#
+# This example demonstrates various file operations.
+#
+# What it does:
+#   - Creates configuration files
+#   - Creates executable scripts
+#   - Creates private files with restricted permissions
+#   - Removes legacy files
+#
+# Prerequisites:
+#   - MachineConfigPool "worker" must exist
+#
+# Apply:
+#   kubectl apply -f 04-file-management.yaml
+#
+# Verify:
+#   kubectl get mc file-examples
+#   minikube ssh "ls -la /etc/mco-examples/"
+#   minikube ssh "cat /etc/mco-examples/app.conf"
+#
+# =============================================================================
+
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfig
+metadata:
+  name: file-examples
+  labels:
+    mco.in-cloud.io/pool: worker
+spec:
+  priority: 50
+
+  files:
+    # -----------------------------------------------------
+    # Example 1: Standard configuration file
+    # -----------------------------------------------------
+    - path: /etc/mco-examples/app.conf
+      content: |
+        # Application configuration
+        [server]
+        host = 0.0.0.0
+        port = 8080
+
+        [logging]
+        level = info
+        format = json
+
+        [features]
+        metrics_enabled = true
+        tracing_enabled = false
+      # 0644 - readable by all, writable by owner
+      mode: 420
+      owner: "root:root"
+      state: present
+
+    # -----------------------------------------------------
+    # Example 2: Executable script
+    # -----------------------------------------------------
+    - path: /usr/local/bin/health-check.sh
+      content: |
+        #!/bin/bash
+        # Health check script managed by MCO Lite
+        set -euo pipefail
+
+        check_service() {
+            systemctl is-active --quiet "$1" && echo "$1: OK" || echo "$1: FAIL"
+        }
+
+        echo "=== Health Check ==="
+        check_service kubelet
+        check_service containerd
+        echo "==================="
+      # 0755 - executable by all, writable by owner
+      mode: 493
+      owner: "root:root"
+      state: present
+
+    # -----------------------------------------------------
+    # Example 3: Private file (credentials)
+    # -----------------------------------------------------
+    - path: /etc/mco-examples/secrets/api-key.conf
+      content: |
+        # API key configuration (example, don't use real secrets!)
+        API_KEY=example-key-12345
+        API_SECRET=example-secret-67890
+      # 0600 - readable/writable only by owner
+      mode: 384
+      owner: "root:root"
+      state: present
+
+    # -----------------------------------------------------
+    # Example 4: File with custom owner
+    # -----------------------------------------------------
+    - path: /etc/mco-examples/nginx.conf
+      content: |
+        # Nginx configuration snippet
+        worker_processes auto;
+        error_log /var/log/nginx/error.log;
+        pid /run/nginx.pid;
+      mode: 420
+      # Owned by nginx user (if exists)
+      # Falls back to root if user doesn't exist
+      owner: "root:root"
+      state: present
+
+    # -----------------------------------------------------
+    # Example 5: Remove legacy file
+    # -----------------------------------------------------
+    - path: /etc/mco-examples/old-config.conf
+      # state: absent removes the file if it exists
+      # content is ignored when state is absent
+      state: absent
+
+  reboot:
+    required: false

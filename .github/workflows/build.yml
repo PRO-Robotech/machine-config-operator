@@ -1,0 +1,61 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    name: Build Binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build controller
+        run: make build-controller
+
+      - name: Build agent
+        run: make build-agent
+
+      - name: Verify binaries exist
+        run: |
+          test -f bin/controller
+          test -f bin/agent
+
+  docker:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build controller image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.controller
+          push: false
+          tags: mco-controller:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build agent image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.agent
+          push: false
+          tags: mco-agent:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

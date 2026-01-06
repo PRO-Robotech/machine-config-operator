@@ -72,6 +72,7 @@ func (r *MachineConfigPoolReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if err := r.Get(ctx, req.NamespacedName, pool); err != nil {
 		if apierrors.IsNotFound(err) {
 			r.debounce.Reset(req.Name)
+			ResetPoolMetrics(req.Name)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -82,9 +83,37 @@ func (r *MachineConfigPoolReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, nil
 	}
 
+	// Detect pool overlap before processing nodes
+	overlap, err := DetectPoolOverlap(ctx, r.Client)
+	if err != nil {
+		log.Error(err, "failed to detect pool overlap")
+		// Continue without overlap detection on error - don't block all reconciliation
+	}
+
+	// Record overlap metrics
+	if overlap != nil && overlap.HasConflicts() {
+		conflictingPools := overlap.GetAllConflictingPools()
+		RecordPoolOverlapMetrics(overlap, conflictingPools)
+		log.Info("pool overlap detected",
+			"totalConflicts", overlap.ConflictCount(),
+			"poolsAffected", conflictingPools)
+	} else {
+		// Reset metrics when no conflicts
+		RecordPoolOverlapMetrics(nil, []string{pool.Name})
+	}
+
 	nodes, err := SelectNodes(ctx, r.Client, pool)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to select nodes: %w", err)
+	}
+
+	// 3. Filter out conflicting nodes - they should not receive desired-revision
+	nonConflictingNodes := FilterNonConflictingNodes(nodes, overlap)
+	conflictingNodeCount := len(nodes) - len(nonConflictingNodes)
+	if conflictingNodeCount > 0 {
+		log.Info("skipping conflicting nodes",
+			"conflicting", conflictingNodeCount,
+			"total", len(nodes))
 	}
 
 	configs, err := SelectMachineConfigs(ctx, r.Client, pool)
@@ -112,7 +141,8 @@ func (r *MachineConfigPoolReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, fmt.Errorf("failed to ensure RMC: %w", err)
 	}
 
-	updated, err := r.annotator.SetDesiredRevisionForNodes(ctx, nodes, rmc.Name, pool.Name)
+	// 4. Only set desired-revision for non-conflicting nodes
+	updated, err := r.annotator.SetDesiredRevisionForNodes(ctx, nonConflictingNodes, rmc.Name, pool.Name)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to set desired revision: %w", err)
 	}
@@ -120,12 +150,15 @@ func (r *MachineConfigPoolReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		log.Info("updated node annotations", "count", updated)
 	}
 
+	// 5. Update status - use ALL nodes for accurate counts, but apply overlap condition
 	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		if err := r.Get(ctx, req.NamespacedName, pool); err != nil {
 			return err
 		}
 		status := AggregateStatus(rmc.Name, nodes)
 		ApplyStatusToPool(pool, status)
+		// Apply overlap condition (adds PoolOverlap and potentially Degraded)
+		ApplyOverlapCondition(pool, overlap)
 		return r.Status().Update(ctx, pool)
 	}); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to update pool status: %w", err)

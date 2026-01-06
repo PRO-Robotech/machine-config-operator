@@ -218,3 +218,119 @@ func mergeConditions(existing, new []metav1.Condition) []metav1.Condition {
 
 	return result
 }
+
+// ComputeOverlapCondition creates the PoolOverlap condition based on overlap detection result.
+func ComputeOverlapCondition(poolName string, overlap *OverlapResult) metav1.Condition {
+	now := metav1.Now()
+
+	if overlap == nil || !overlap.HasConflicts() {
+		return metav1.Condition{
+			Type:               mcov1alpha1.ConditionPoolOverlap,
+			Status:             metav1.ConditionFalse,
+			Reason:             "NoOverlap",
+			Message:            "No overlapping nodes detected",
+			LastTransitionTime: now,
+		}
+	}
+
+	conflictingNodes := overlap.GetConflictsForPool(poolName)
+	if len(conflictingNodes) == 0 {
+		return metav1.Condition{
+			Type:               mcov1alpha1.ConditionPoolOverlap,
+			Status:             metav1.ConditionFalse,
+			Reason:             "NoOverlap",
+			Message:            "No overlapping nodes detected",
+			LastTransitionTime: now,
+		}
+	}
+
+	// Build a message with node and pool information
+	poolsInvolved := make(map[string]struct{})
+	for _, nodeName := range conflictingNodes {
+		pools := overlap.GetPoolsForNode(nodeName)
+		for _, p := range pools {
+			poolsInvolved[p] = struct{}{}
+		}
+	}
+
+	// Remove current pool from the list for clearer message
+	delete(poolsInvolved, poolName)
+	otherPools := make([]string, 0, len(poolsInvolved))
+	for p := range poolsInvolved {
+		otherPools = append(otherPools, p)
+	}
+	sort.Strings(otherPools)
+
+	var message string
+	if len(conflictingNodes) == 1 {
+		message = fmt.Sprintf("Node %s also matches pools: %v", conflictingNodes[0], otherPools)
+	} else {
+		message = fmt.Sprintf("Nodes %v also match pools: %v", conflictingNodes, otherPools)
+	}
+
+	return metav1.Condition{
+		Type:               mcov1alpha1.ConditionPoolOverlap,
+		Status:             metav1.ConditionTrue,
+		Reason:             "NodesInMultiplePools",
+		Message:            message,
+		LastTransitionTime: now,
+	}
+}
+
+// ApplyOverlapCondition updates the pool's conditions with overlap status.
+// It also sets Degraded=True when there's an overlap conflict.
+func ApplyOverlapCondition(pool *mcov1alpha1.MachineConfigPool, overlap *OverlapResult) {
+	overlapCondition := ComputeOverlapCondition(pool.Name, overlap)
+
+	// Find and update or append the PoolOverlap condition
+	found := false
+	for i, c := range pool.Status.Conditions {
+		if c.Type == mcov1alpha1.ConditionPoolOverlap {
+			if c.Status == overlapCondition.Status {
+				overlapCondition.LastTransitionTime = c.LastTransitionTime
+			}
+			pool.Status.Conditions[i] = overlapCondition
+			found = true
+			break
+		}
+	}
+	if !found {
+		pool.Status.Conditions = append(pool.Status.Conditions, overlapCondition)
+	}
+
+	// If there's overlap, ensure Degraded is set
+	if overlapCondition.Status == metav1.ConditionTrue {
+		setDegradedForOverlap(pool)
+	}
+}
+
+// setDegradedForOverlap sets Degraded=True due to pool overlap.
+// This doesn't override other degraded reasons - it only adds overlap reason if not already degraded.
+func setDegradedForOverlap(pool *mcov1alpha1.MachineConfigPool) {
+	now := metav1.Now()
+
+	for i, c := range pool.Status.Conditions {
+		if c.Type == mcov1alpha1.ConditionDegraded {
+			// Only update if not already degraded for another reason
+			if c.Status != metav1.ConditionTrue {
+				pool.Status.Conditions[i] = metav1.Condition{
+					Type:               mcov1alpha1.ConditionDegraded,
+					Status:             metav1.ConditionTrue,
+					Reason:             "PoolOverlapDetected",
+					Message:            "Pool has nodes that match other pools",
+					LastTransitionTime: now,
+				}
+			}
+			return
+		}
+	}
+
+	// No existing Degraded condition, add one
+	pool.Status.Conditions = append(pool.Status.Conditions, metav1.Condition{
+		Type:               mcov1alpha1.ConditionDegraded,
+		Status:             metav1.ConditionTrue,
+		Reason:             "PoolOverlapDetected",
+		Message:            "Pool has nodes that match other pools",
+		LastTransitionTime: now,
+	})
+}

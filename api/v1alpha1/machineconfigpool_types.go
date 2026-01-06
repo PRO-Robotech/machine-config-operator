@@ -157,6 +157,9 @@ const (
 
 	// ConditionRenderDegraded indicates the renderer failed to create a RenderedMachineConfig.
 	ConditionRenderDegraded string = "RenderDegraded"
+
+	// ConditionPoolOverlap indicates nodes in this pool also match other pools.
+	ConditionPoolOverlap string = "PoolOverlap"
 )
 
 // +kubebuilder:object:root=true

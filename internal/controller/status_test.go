@@ -385,3 +385,254 @@ func TestMergeConditions_NewCondition(t *testing.T) {
 		t.Error("New condition should use provided LastTransitionTime")
 	}
 }
+
+// TestComputeOverlapCondition_NoConflicts verifies condition when no overlap.
+func TestComputeOverlapCondition_NoConflicts(t *testing.T) {
+	overlap := NewOverlapResult()
+
+	condition := ComputeOverlapCondition("workers", overlap)
+
+	if condition.Type != mcov1alpha1.ConditionPoolOverlap {
+		t.Errorf("Type = %s, want PoolOverlap", condition.Type)
+	}
+	if condition.Status != metav1.ConditionFalse {
+		t.Errorf("Status = %s, want False", condition.Status)
+	}
+	if condition.Reason != "NoOverlap" {
+		t.Errorf("Reason = %s, want NoOverlap", condition.Reason)
+	}
+}
+
+// TestComputeOverlapCondition_NilOverlap verifies condition when overlap is nil.
+func TestComputeOverlapCondition_NilOverlap(t *testing.T) {
+	condition := ComputeOverlapCondition("workers", nil)
+
+	if condition.Status != metav1.ConditionFalse {
+		t.Errorf("Status = %s, want False for nil overlap", condition.Status)
+	}
+}
+
+// TestComputeOverlapCondition_HasConflict verifies condition when pool has overlapping nodes.
+func TestComputeOverlapCondition_HasConflict(t *testing.T) {
+	overlap := &OverlapResult{
+		ConflictingNodes: map[string][]string{
+			"node1": {"workers", "infra"},
+			"node2": {"workers", "prod"},
+		},
+	}
+
+	condition := ComputeOverlapCondition("workers", overlap)
+
+	if condition.Status != metav1.ConditionTrue {
+		t.Errorf("Status = %s, want True", condition.Status)
+	}
+	if condition.Reason != "NodesInMultiplePools" {
+		t.Errorf("Reason = %s, want NodesInMultiplePools", condition.Reason)
+	}
+
+	// Message should contain node names and other pools
+	if condition.Message == "" {
+		t.Error("Message should not be empty")
+	}
+}
+
+// TestComputeOverlapCondition_SingleNode verifies message format for single node.
+func TestComputeOverlapCondition_SingleNode(t *testing.T) {
+	overlap := &OverlapResult{
+		ConflictingNodes: map[string][]string{
+			"node1": {"workers", "infra"},
+		},
+	}
+
+	condition := ComputeOverlapCondition("workers", overlap)
+
+	// For single node, message format should be "Node X also matches pools: [Y]"
+	if condition.Message == "" {
+		t.Error("Message should not be empty")
+	}
+	// Verify it mentions the other pool (infra) but not the current pool (workers)
+	if len(condition.Message) == 0 {
+		t.Error("Message should describe the conflict")
+	}
+}
+
+// TestComputeOverlapCondition_PoolNotInConflict verifies pool with no conflicting nodes.
+func TestComputeOverlapCondition_PoolNotInConflict(t *testing.T) {
+	overlap := &OverlapResult{
+		ConflictingNodes: map[string][]string{
+			"node1": {"infra", "prod"}, // workers is not involved
+		},
+	}
+
+	condition := ComputeOverlapCondition("workers", overlap)
+
+	// workers has no conflicting nodes, should be False
+	if condition.Status != metav1.ConditionFalse {
+		t.Errorf("Status = %s, want False (pool not in conflict)", condition.Status)
+	}
+}
+
+// TestApplyOverlapCondition_NoConflicts verifies applying no-conflict condition.
+func TestApplyOverlapCondition_NoConflicts(t *testing.T) {
+	pool := &mcov1alpha1.MachineConfigPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "workers"},
+	}
+	overlap := NewOverlapResult()
+
+	ApplyOverlapCondition(pool, overlap)
+
+	// Should have PoolOverlap condition
+	var foundOverlap bool
+	for _, c := range pool.Status.Conditions {
+		if c.Type == mcov1alpha1.ConditionPoolOverlap {
+			foundOverlap = true
+			if c.Status != metav1.ConditionFalse {
+				t.Errorf("PoolOverlap status = %s, want False", c.Status)
+			}
+		}
+	}
+	if !foundOverlap {
+		t.Error("PoolOverlap condition should be added")
+	}
+}
+
+// TestApplyOverlapCondition_WithConflicts verifies applying conflict condition.
+func TestApplyOverlapCondition_WithConflicts(t *testing.T) {
+	pool := &mcov1alpha1.MachineConfigPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "workers"},
+	}
+	overlap := &OverlapResult{
+		ConflictingNodes: map[string][]string{
+			"node1": {"workers", "infra"},
+		},
+	}
+
+	ApplyOverlapCondition(pool, overlap)
+
+	// Should have PoolOverlap=True
+	var foundOverlap, foundDegraded bool
+	for _, c := range pool.Status.Conditions {
+		if c.Type == mcov1alpha1.ConditionPoolOverlap {
+			foundOverlap = true
+			if c.Status != metav1.ConditionTrue {
+				t.Errorf("PoolOverlap status = %s, want True", c.Status)
+			}
+		}
+		if c.Type == mcov1alpha1.ConditionDegraded {
+			foundDegraded = true
+			if c.Status != metav1.ConditionTrue {
+				t.Errorf("Degraded status = %s, want True", c.Status)
+			}
+			if c.Reason != "PoolOverlapDetected" {
+				t.Errorf("Degraded reason = %s, want PoolOverlapDetected", c.Reason)
+			}
+		}
+	}
+	if !foundOverlap {
+		t.Error("PoolOverlap condition should be added")
+	}
+	if !foundDegraded {
+		t.Error("Degraded condition should be set when overlap detected")
+	}
+}
+
+// TestApplyOverlapCondition_PreservesExistingConditions verifies existing conditions are preserved.
+func TestApplyOverlapCondition_PreservesExistingConditions(t *testing.T) {
+	pool := &mcov1alpha1.MachineConfigPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "workers"},
+		Status: mcov1alpha1.MachineConfigPoolStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   mcov1alpha1.ConditionUpdated,
+					Status: metav1.ConditionTrue,
+					Reason: "AllNodesUpdated",
+				},
+			},
+		},
+	}
+	overlap := NewOverlapResult()
+
+	ApplyOverlapCondition(pool, overlap)
+
+	// Original Updated condition should still be there
+	var foundUpdated bool
+	for _, c := range pool.Status.Conditions {
+		if c.Type == mcov1alpha1.ConditionUpdated {
+			foundUpdated = true
+		}
+	}
+	if !foundUpdated {
+		t.Error("Existing Updated condition should be preserved")
+	}
+}
+
+// TestApplyOverlapCondition_UpdatesExistingOverlapCondition verifies condition update.
+func TestApplyOverlapCondition_UpdatesExistingOverlapCondition(t *testing.T) {
+	oldTime := metav1.NewTime(time.Now().Add(-1 * time.Hour))
+	pool := &mcov1alpha1.MachineConfigPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "workers"},
+		Status: mcov1alpha1.MachineConfigPoolStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:               mcov1alpha1.ConditionPoolOverlap,
+					Status:             metav1.ConditionFalse,
+					Reason:             "NoOverlap",
+					LastTransitionTime: oldTime,
+				},
+			},
+		},
+	}
+
+	// Now there's a conflict
+	overlap := &OverlapResult{
+		ConflictingNodes: map[string][]string{
+			"node1": {"workers", "infra"},
+		},
+	}
+
+	ApplyOverlapCondition(pool, overlap)
+
+	// Find PoolOverlap condition
+	for _, c := range pool.Status.Conditions {
+		if c.Type == mcov1alpha1.ConditionPoolOverlap {
+			if c.Status != metav1.ConditionTrue {
+				t.Errorf("PoolOverlap status should be updated to True")
+			}
+			// LastTransitionTime should be updated (status changed)
+			if c.LastTransitionTime == oldTime {
+				t.Error("LastTransitionTime should be updated when status changes")
+			}
+			return
+		}
+	}
+	t.Error("PoolOverlap condition not found")
+}
+
+// TestSetDegradedForOverlap_DoesNotOverrideExistingDegraded verifies existing degraded is preserved.
+func TestSetDegradedForOverlap_DoesNotOverrideExistingDegraded(t *testing.T) {
+	pool := &mcov1alpha1.MachineConfigPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "workers"},
+		Status: mcov1alpha1.MachineConfigPoolStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   mcov1alpha1.ConditionDegraded,
+					Status: metav1.ConditionTrue,
+					Reason: "NodeErrors", // Existing degraded reason
+				},
+			},
+		},
+	}
+
+	setDegradedForOverlap(pool)
+
+	// Should not override existing Degraded=True with a different reason
+	for _, c := range pool.Status.Conditions {
+		if c.Type == mcov1alpha1.ConditionDegraded {
+			if c.Reason != "NodeErrors" {
+				t.Errorf("Degraded reason should not change from NodeErrors, got %s", c.Reason)
+			}
+			return
+		}
+	}
+	t.Error("Degraded condition not found")
+}

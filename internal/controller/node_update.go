@@ -15,27 +15,45 @@ import (
 	"in-cloud.io/machine-config/pkg/annotations"
 )
 
+// NodeUpdateResult contains the result of processing a node update.
 type NodeUpdateResult struct {
 	Result        ctrl.Result
 	DrainStuck    bool
 	DrainStuckMsg string
+
+	// Event flags for centralized event emission
+	Cordoned      bool // Node was just cordoned in this reconcile
+	DrainStarted  bool // Drain was just started in this reconcile
+	DrainComplete bool // Drain just completed in this reconcile
+	Uncordoned    bool // Node was just uncordoned in this reconcile
 }
 
+// ProcessNodeUpdate handles the node update lifecycle: cordon -> drain -> set revision -> uncordon.
+// drainTimeoutSeconds specifies the maximum time before marking drain as stuck.
+// If drainTimeoutSeconds is 0, DefaultDrainTimeoutSeconds (3600) is used.
 func ProcessNodeUpdate(
 	ctx context.Context,
 	c client.Client,
 	pool *mcov1alpha1.MachineConfigPool,
 	node *corev1.Node,
 	targetRevision string,
+	drainTimeoutSeconds int,
 ) NodeUpdateResult {
 	logger := log.FromContext(ctx)
+
+	// Check if drain was already started (for DrainStarted event)
+	drainWasStarted := annotations.GetAnnotation(node.Annotations, annotations.DrainStartedAt) != ""
 
 	if !IsNodeCordoned(node) {
 		if err := CordonNode(ctx, c, node); err != nil {
 			logger.Error(err, "failed to cordon node", "node", node.Name)
 			return NodeUpdateResult{Result: ctrl.Result{RequeueAfter: 5 * time.Second}}
 		}
-		return NodeUpdateResult{Result: ctrl.Result{RequeueAfter: time.Second}}
+		// Node was just cordoned
+		return NodeUpdateResult{
+			Result:   ctrl.Result{RequeueAfter: time.Second},
+			Cordoned: true,
+		}
 	}
 
 	drainConfig := DrainConfig{
@@ -53,7 +71,7 @@ func ProcessNodeUpdate(
 	if !complete {
 		if err := DrainNode(ctx, c, node, drainConfig); err != nil {
 			logger.Info("drain incomplete, scheduling retry", "node", node.Name, "error", err)
-			retry := HandleDrainRetry(ctx, c, node)
+			retry := HandleDrainRetry(ctx, c, node, drainTimeoutSeconds)
 
 			result := NodeUpdateResult{
 				Result:     ctrl.Result{RequeueAfter: retry.RequeueAfter},
@@ -63,9 +81,23 @@ func ProcessNodeUpdate(
 				result.DrainStuckMsg = fmt.Sprintf("Node %s drain timeout: %v", node.Name, err)
 				RecordDrainStuck(pool.Name)
 			}
+			// DrainStarted event: first time drain started (annotation was just set)
+			if !drainWasStarted {
+				result.DrainStarted = true
+			}
 			return result
 		}
+		// Drain in progress but making progress - check if this is first drain call
+		if !drainWasStarted {
+			return NodeUpdateResult{
+				Result:       ctrl.Result{RequeueAfter: 5 * time.Second},
+				DrainStarted: true,
+			}
+		}
 	}
+
+	// Drain is complete - set flag if we just transitioned
+	drainJustCompleted := drainWasStarted && complete
 
 	currentDesired := annotations.GetAnnotation(node.Annotations, annotations.DesiredRevision)
 	if currentDesired != targetRevision {
@@ -76,7 +108,10 @@ func ProcessNodeUpdate(
 		if err := SetNodeAnnotation(ctx, c, node, annotations.Pool, pool.Name); err != nil {
 			logger.Error(err, "failed to set pool annotation", "node", node.Name)
 		}
-		return NodeUpdateResult{Result: ctrl.Result{RequeueAfter: time.Second}}
+		return NodeUpdateResult{
+			Result:        ctrl.Result{RequeueAfter: time.Second},
+			DrainComplete: drainJustCompleted,
+		}
 	}
 
 	if ShouldUncordon(node, targetRevision) {
@@ -92,12 +127,17 @@ func ProcessNodeUpdate(
 			return NodeUpdateResult{Result: ctrl.Result{RequeueAfter: 5 * time.Second}}
 		}
 		logger.Info("node update complete", "node", node.Name, "revision", targetRevision)
-		return NodeUpdateResult{Result: ctrl.Result{}}
+		// Node was just uncordoned - update complete
+		return NodeUpdateResult{
+			Result:     ctrl.Result{},
+			Uncordoned: true,
+		}
 	}
 
 	return NodeUpdateResult{Result: ctrl.Result{RequeueAfter: 10 * time.Second}}
 }
 
+// SetDrainStuckCondition sets DrainStuck=True and also Degraded=True (per FR-009-AC6).
 func SetDrainStuckCondition(pool *mcov1alpha1.MachineConfigPool, message string) {
 	condition := metav1.Condition{
 		Type:               mcov1alpha1.ConditionDrainStuck,
@@ -110,10 +150,43 @@ func SetDrainStuckCondition(pool *mcov1alpha1.MachineConfigPool, message string)
 	for i, c := range pool.Status.Conditions {
 		if c.Type == mcov1alpha1.ConditionDrainStuck {
 			pool.Status.Conditions[i] = condition
+			setDegradedForDrainStuck(pool)
 			return
 		}
 	}
 	pool.Status.Conditions = append(pool.Status.Conditions, condition)
+	setDegradedForDrainStuck(pool)
+}
+
+// setDegradedForDrainStuck sets Degraded=True due to drain timeout.
+// This doesn't override other degraded reasons - it only adds DrainStuck reason if not already degraded.
+func setDegradedForDrainStuck(pool *mcov1alpha1.MachineConfigPool) {
+	now := metav1.Now()
+
+	for i, c := range pool.Status.Conditions {
+		if c.Type == mcov1alpha1.ConditionDegraded {
+			// Only update if not already degraded for another reason
+			if c.Status != metav1.ConditionTrue {
+				pool.Status.Conditions[i] = metav1.Condition{
+					Type:               mcov1alpha1.ConditionDegraded,
+					Status:             metav1.ConditionTrue,
+					Reason:             "DrainStuck",
+					Message:            "One or more nodes have drain stuck",
+					LastTransitionTime: now,
+				}
+			}
+			return
+		}
+	}
+
+	// No existing Degraded condition, add one
+	pool.Status.Conditions = append(pool.Status.Conditions, metav1.Condition{
+		Type:               mcov1alpha1.ConditionDegraded,
+		Status:             metav1.ConditionTrue,
+		Reason:             "DrainStuck",
+		Message:            "One or more nodes have drain stuck",
+		LastTransitionTime: now,
+	})
 }
 
 func ClearDrainStuckCondition(pool *mcov1alpha1.MachineConfigPool) {

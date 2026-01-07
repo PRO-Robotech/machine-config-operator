@@ -37,8 +37,16 @@ func newReconciler(objs ...client.Object) *MachineConfigPoolReconciler {
 	_ = corev1.AddToScheme(scheme)
 	_ = mcov1alpha1.AddToScheme(scheme)
 
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).
-		WithStatusSubresource(&mcov1alpha1.MachineConfigPool{}).Build()
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(objs...).
+		WithStatusSubresource(&mcov1alpha1.MachineConfigPool{}).
+		// Add pod index for drain operations
+		WithIndex(&corev1.Pod{}, "spec.nodeName", func(obj client.Object) []string {
+			pod := obj.(*corev1.Pod)
+			return []string{pod.Spec.NodeName}
+		}).
+		Build()
 
 	return NewMachineConfigPoolReconciler(c, scheme)
 }
@@ -213,19 +221,43 @@ func TestReconcile_SetsNodeAnnotations(t *testing.T) {
 
 	r := newReconciler(pool, node, mc)
 
+	// First reconcile - debounce (since config changes)
 	r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: client.ObjectKey{Name: "worker"},
 	})
 
-	_, err := r.Reconcile(context.Background(), ctrl.Request{
+	// Second reconcile - node gets cordoned
+	r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: client.ObjectKey{Name: "worker"},
 	})
 
-	if err != nil {
-		t.Fatalf("Reconcile() error = %v", err)
+	// Check node is cordoned
+	updatedNode := &corev1.Node{}
+	if err := r.Get(context.Background(), client.ObjectKey{Name: "worker-1"}, updatedNode); err != nil {
+		t.Fatalf("Failed to get node: %v", err)
 	}
 
-	updatedNode := &corev1.Node{}
+	if !updatedNode.Spec.Unschedulable {
+		t.Error("node should be cordoned (unschedulable)")
+	}
+
+	cordoned := updatedNode.Annotations[annotations.Cordoned]
+	if cordoned != "true" {
+		t.Errorf("cordoned annotation = %q, want %q", cordoned, "true")
+	}
+
+	// Run additional reconciles - drain completes (no pods), desired-revision set
+	// May need multiple reconciles as each step in ProcessNodeUpdate returns with requeue
+	for i := 0; i < 5; i++ {
+		_, err := r.Reconcile(context.Background(), ctrl.Request{
+			NamespacedName: client.ObjectKey{Name: "worker"},
+		})
+		if err != nil {
+			t.Fatalf("Reconcile() error = %v at iteration %d", err, i)
+		}
+	}
+
+	// Check node has desired-revision
 	if err := r.Get(context.Background(), client.ObjectKey{Name: "worker-1"}, updatedNode); err != nil {
 		t.Fatalf("Failed to get node: %v", err)
 	}

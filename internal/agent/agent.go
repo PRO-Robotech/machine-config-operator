@@ -374,6 +374,17 @@ func (a *Agent) applyConfig(ctx context.Context, rmc *mcov1alpha1.RenderedMachin
 		"unitsApplied", result.UnitsApplied,
 		"unitsSkipped", result.UnitsSkipped)
 
+	// If no changes were applied, skip reboot check entirely.
+	// This prevents unnecessary reboots when files already exist on host.
+	if result.FilesApplied == 0 && result.UnitsApplied == 0 {
+		log.Info("no changes applied, skipping reboot check")
+		a.pendingRebootRevision = ""
+		if err := a.writer.SetDone(ctx, rmc.Name); err != nil {
+			return fmt.Errorf("set done state: %w", err)
+		}
+		return nil
+	}
+
 	currentRevision := annotations.GetAnnotation(node.Annotations, annotations.CurrentRevision)
 	decision := a.rebootDeterminer.DetermineReboot(ctx, currentRevision, rmc)
 

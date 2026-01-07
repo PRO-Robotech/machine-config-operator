@@ -19,9 +19,12 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -43,6 +46,7 @@ type MachineConfigPoolReconciler struct {
 	debounce  *DebounceState
 	annotator *NodeAnnotator
 	cleaner   *RMCCleaner
+	events    *EventRecorder
 }
 
 // NewMachineConfigPoolReconciler creates a new reconciler with all components.
@@ -53,6 +57,7 @@ func NewMachineConfigPoolReconciler(c client.Client, scheme *runtime.Scheme) *Ma
 		debounce:  NewDebounceState(),
 		annotator: NewNodeAnnotator(c),
 		cleaner:   NewRMCCleaner(c),
+		events:    &EventRecorder{}, // nil-safe: methods check for nil recorder
 	}
 }
 
@@ -90,16 +95,27 @@ func (r *MachineConfigPoolReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		// Continue without overlap detection on error - don't block all reconciliation
 	}
 
-	// Record overlap metrics
+	// Check if overlap was previously true (for PoolOverlapResolved event)
+	wasOverlapping := hasPoolOverlapCondition(pool)
+
+	// Record overlap metrics and emit events
 	if overlap != nil && overlap.HasConflicts() {
 		conflictingPools := overlap.GetAllConflictingPools()
 		RecordPoolOverlapMetrics(overlap, conflictingPools)
+		conflictingNodes := overlap.GetConflictsForPool(pool.Name)
+		if len(conflictingNodes) > 0 {
+			r.events.PoolOverlapDetected(pool, conflictingNodes)
+		}
 		log.Info("pool overlap detected",
 			"totalConflicts", overlap.ConflictCount(),
 			"poolsAffected", conflictingPools)
 	} else {
 		// Reset metrics when no conflicts
 		RecordPoolOverlapMetrics(nil, []string{pool.Name})
+		// Emit PoolOverlapResolved if it was previously overlapping
+		if wasOverlapping {
+			r.events.PoolOverlapResolved(pool)
+		}
 	}
 
 	nodes, err := SelectNodes(ctx, r.Client, pool)
@@ -141,16 +157,89 @@ func (r *MachineConfigPoolReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, fmt.Errorf("failed to ensure RMC: %w", err)
 	}
 
-	// 4. Only set desired-revision for non-conflicting nodes
-	updated, err := r.annotator.SetDesiredRevisionForNodes(ctx, nonConflictingNodes, rmc.Name, pool.Name)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to set desired revision: %w", err)
+	// 4. Select nodes for update respecting maxUnavailable
+	// This returns nodes that can START a new update
+	newNodesToUpdate := SelectNodesForUpdate(pool, nonConflictingNodes, rmc.Name)
+
+	// Also include nodes that are already in-progress (cordoned/draining)
+	// These need to continue their update lifecycle
+	nodesToProcess := collectNodesInProgress(nonConflictingNodes, rmc.Name)
+
+	// Merge: add new nodes to process list (avoiding duplicates)
+	inProgressNames := make(map[string]bool)
+	for i := range nodesToProcess {
+		inProgressNames[nodesToProcess[i].Name] = true
 	}
-	if updated > 0 {
-		log.Info("updated node annotations", "count", updated)
+	for i := range newNodesToUpdate {
+		if !inProgressNames[newNodesToUpdate[i].Name] {
+			nodesToProcess = append(nodesToProcess, newNodesToUpdate[i])
+		}
 	}
 
-	// 5. Update status - use ALL nodes for accurate counts, but apply overlap condition
+	log.Info("processing node updates",
+		"pool", pool.Name,
+		"totalNodes", len(nonConflictingNodes),
+		"newNodes", len(newNodesToUpdate),
+		"inProgress", len(nodesToProcess)-len(newNodesToUpdate),
+		"maxUnavailable", pool.Spec.Rollout.MaxUnavailable)
+
+	// Emit event for new batch of nodes starting update
+	if len(newNodesToUpdate) > 0 {
+		newNodeNames := make([]string, len(newNodesToUpdate))
+		for i := range newNodesToUpdate {
+			newNodeNames[i] = newNodesToUpdate[i].Name
+		}
+		r.events.RolloutBatchStarted(pool, len(newNodesToUpdate), newNodeNames)
+	}
+
+	// 5. Process each node through cordon/drain/update/uncordon lifecycle
+	var minRequeueAfter time.Duration
+	var drainStuckNodes []string
+	var uncordonedCount int
+
+	// Get drain timeout from spec (defaults to 3600)
+	drainTimeoutSeconds := pool.Spec.Rollout.DrainTimeoutSeconds
+	if drainTimeoutSeconds == 0 {
+		drainTimeoutSeconds = DefaultDrainTimeoutSeconds
+	}
+
+	for i := range nodesToProcess {
+		node := &nodesToProcess[i]
+		result := ProcessNodeUpdate(ctx, r.Client, pool, node, rmc.Name, drainTimeoutSeconds)
+
+		// Emit lifecycle events based on result flags
+		if result.Cordoned {
+			r.events.NodeCordonStarted(pool, node.Name)
+		}
+		if result.DrainStarted {
+			r.events.NodeDrainStarted(pool, node.Name)
+		}
+		if result.DrainComplete {
+			r.events.DrainComplete(pool, node.Name)
+		}
+		if result.Uncordoned {
+			r.events.NodeUncordoned(pool, node.Name)
+			uncordonedCount++
+		}
+
+		// Track drain stuck nodes
+		if result.DrainStuck {
+			drainStuckNodes = append(drainStuckNodes, node.Name)
+		}
+
+		// Track minimum requeue time
+		if result.Result.RequeueAfter > 0 {
+			if minRequeueAfter == 0 || result.Result.RequeueAfter < minRequeueAfter {
+				minRequeueAfter = result.Result.RequeueAfter
+			}
+		}
+	}
+
+	// 6. Update status - use ALL nodes for accurate counts, but apply overlap and drain stuck conditions
+	// Track if rollout just completed for event emission
+	wasNotComplete := pool.Status.UpdatedMachineCount != pool.Status.MachineCount ||
+		pool.Status.ReadyMachineCount != pool.Status.MachineCount
+
 	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		if err := r.Get(ctx, req.NamespacedName, pool); err != nil {
 			return err
@@ -159,9 +248,34 @@ func (r *MachineConfigPoolReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		ApplyStatusToPool(pool, status)
 		// Apply overlap condition (adds PoolOverlap and potentially Degraded)
 		ApplyOverlapCondition(pool, overlap)
+
+		// Apply drain stuck condition
+		if len(drainStuckNodes) > 0 {
+			msg := fmt.Sprintf("Drain stuck on nodes: %s", strings.Join(drainStuckNodes, ", "))
+			SetDrainStuckCondition(pool, msg)
+			// Emit event for each stuck node
+			for _, nodeName := range drainStuckNodes {
+				r.events.DrainStuck(pool, nodeName)
+			}
+			log.Info("drain stuck detected",
+				"pool", pool.Name,
+				"nodes", drainStuckNodes)
+		} else {
+			ClearDrainStuckCondition(pool)
+		}
+
 		// Update metrics
 		UpdateCordonedNodesGauge(pool.Name, status.CordonedMachineCount)
 		UpdateDrainingNodesGauge(pool.Name, status.DrainingMachineCount)
+
+		// Emit RolloutComplete if all nodes just became updated and ready
+		if wasNotComplete && status.MachineCount > 0 &&
+			status.UpdatedMachineCount == status.MachineCount &&
+			status.ReadyMachineCount == status.MachineCount {
+			r.events.RolloutComplete(pool)
+			log.Info("rollout complete", "pool", pool.Name, "nodes", status.MachineCount)
+		}
+
 		return r.Status().Update(ctx, pool)
 	}); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to update pool status: %w", err)
@@ -174,6 +288,11 @@ func (r *MachineConfigPoolReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 	if deleted > 0 {
 		log.Info("cleaned up old RMCs", "count", deleted)
+	}
+
+	// Return with requeue if node updates are in progress
+	if minRequeueAfter > 0 {
+		return ctrl.Result{RequeueAfter: minRequeueAfter}, nil
 	}
 
 	return ctrl.Result{}, nil
@@ -238,6 +357,9 @@ func (r *MachineConfigPoolReconciler) ensureRMC(
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *MachineConfigPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Initialize EventRecorder
+	r.events = NewEventRecorder(mgr.GetEventRecorderFor("machineconfigpool-controller"))
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&mcov1alpha1.MachineConfigPool{}).
 		Owns(&mcov1alpha1.RenderedMachineConfig{}).
@@ -296,4 +418,14 @@ func (r *MachineConfigPoolReconciler) mapNodeToPool(ctx context.Context, obj cli
 	}
 
 	return requests
+}
+
+// hasPoolOverlapCondition checks if the pool has a PoolOverlap condition set to True.
+func hasPoolOverlapCondition(pool *mcov1alpha1.MachineConfigPool) bool {
+	for _, c := range pool.Status.Conditions {
+		if c.Type == mcov1alpha1.ConditionPoolOverlap && c.Status == metav1.ConditionTrue {
+			return true
+		}
+	}
+	return false
 }

@@ -1,0 +1,20 @@
+---
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfig
+metadata:
+  name: 50-file-absent-test
+  labels:
+    mco.in-cloud.io/pool: worker
+spec:
+  priority: 50
+
+  files:
+    # This file should be deleted if it exists
+    - path: /etc/mco-test/delete-me.txt
+      content: ""  # Content is ignored for absent state
+      mode: 0644
+      owner: root:root
+      state: absent  # <-- Key: this means DELETE the file
+
+  reboot:
+    required: false

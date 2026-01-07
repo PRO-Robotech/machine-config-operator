@@ -1,0 +1,21 @@
+# Scenario 005: Initial config (v1)
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfig
+metadata:
+  name: 005-reboot-modify
+  labels:
+    mco.in-cloud.io/pool: worker
+spec:
+  priority: 50
+  files:
+    - path: /etc/mco-reboot-modify-test.conf
+      content: |
+        # Config that requires reboot
+        version=v1
+        setting=initial
+      mode: 0644
+      owner: root:root
+      state: present
+  reboot:
+    required: true
+    reason: "Kernel parameter changes"

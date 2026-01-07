@@ -157,7 +157,13 @@ type DrainRetryResult struct {
 	SetDrainStuck bool
 }
 
-func HandleDrainRetry(ctx context.Context, c client.Client, node *corev1.Node) DrainRetryResult {
+// DefaultDrainTimeoutSeconds is the default drain timeout (1 hour).
+const DefaultDrainTimeoutSeconds = 3600
+
+// HandleDrainRetry manages drain retry logic and determines if drain is stuck.
+// drainTimeoutSeconds specifies the maximum time before marking drain as stuck.
+// If drainTimeoutSeconds is 0, DefaultDrainTimeoutSeconds (3600) is used.
+func HandleDrainRetry(ctx context.Context, c client.Client, node *corev1.Node, drainTimeoutSeconds int) DrainRetryResult {
 	drainStartStr := annotations.GetAnnotation(node.Annotations, annotations.DrainStartedAt)
 	if drainStartStr == "" {
 		return DrainRetryResult{RequeueAfter: time.Minute, SetDrainStuck: false}
@@ -173,10 +179,16 @@ func HandleDrainRetry(ctx context.Context, c client.Client, node *corev1.Node) D
 	retryCount := GetIntAnnotation(node, annotations.DrainRetryCount) + 1
 	_ = SetNodeAnnotation(ctx, c, node, annotations.DrainRetryCount, strconv.Itoa(retryCount))
 
+	// Use default timeout if not specified
+	if drainTimeoutSeconds <= 0 {
+		drainTimeoutSeconds = DefaultDrainTimeoutSeconds
+	}
+	drainTimeout := time.Duration(drainTimeoutSeconds) * time.Second
+
 	switch {
 	case elapsed < 10*time.Minute:
 		return DrainRetryResult{RequeueAfter: time.Minute, SetDrainStuck: false}
-	case elapsed < 60*time.Minute:
+	case elapsed < drainTimeout:
 		return DrainRetryResult{RequeueAfter: 5 * time.Minute, SetDrainStuck: false}
 	default:
 		return DrainRetryResult{RequeueAfter: 5 * time.Minute, SetDrainStuck: true}

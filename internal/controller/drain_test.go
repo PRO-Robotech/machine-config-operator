@@ -255,7 +255,7 @@ func TestHandleDrainRetry_Phase1(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node).Build()
 	ctx := context.Background()
 
-	result := HandleDrainRetry(ctx, c, node)
+	result := HandleDrainRetry(ctx, c, node, DefaultDrainTimeoutSeconds)
 
 	if result.RequeueAfter != time.Minute {
 		t.Errorf("expected 1 minute requeue, got %v", result.RequeueAfter)
@@ -282,7 +282,7 @@ func TestHandleDrainRetry_Phase2(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node).Build()
 	ctx := context.Background()
 
-	result := HandleDrainRetry(ctx, c, node)
+	result := HandleDrainRetry(ctx, c, node, DefaultDrainTimeoutSeconds)
 
 	if result.RequeueAfter != 5*time.Minute {
 		t.Errorf("expected 5 minute requeue, got %v", result.RequeueAfter)
@@ -309,7 +309,7 @@ func TestHandleDrainRetry_Phase3_DrainStuck(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node).Build()
 	ctx := context.Background()
 
-	result := HandleDrainRetry(ctx, c, node)
+	result := HandleDrainRetry(ctx, c, node, DefaultDrainTimeoutSeconds)
 
 	if result.RequeueAfter != 5*time.Minute {
 		t.Errorf("expected 5 minute requeue, got %v", result.RequeueAfter)
@@ -330,13 +330,69 @@ func TestHandleDrainRetry_NoDrainStarted(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node).Build()
 	ctx := context.Background()
 
-	result := HandleDrainRetry(ctx, c, node)
+	result := HandleDrainRetry(ctx, c, node, DefaultDrainTimeoutSeconds)
 
 	if result.RequeueAfter != time.Minute {
 		t.Errorf("expected 1 minute requeue for first attempt, got %v", result.RequeueAfter)
 	}
 	if result.SetDrainStuck {
 		t.Error("expected SetDrainStuck to be false")
+	}
+}
+
+func TestHandleDrainRetry_CustomTimeout(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+
+	// Drain started 20 minutes ago
+	drainStart := time.Now().Add(-20 * time.Minute)
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-node",
+			Annotations: map[string]string{
+				annotations.DrainStartedAt: drainStart.Format(time.RFC3339),
+			},
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node).Build()
+	ctx := context.Background()
+
+	// With default timeout (3600s), should not be stuck
+	result := HandleDrainRetry(ctx, c, node, DefaultDrainTimeoutSeconds)
+	if result.SetDrainStuck {
+		t.Error("expected SetDrainStuck to be false with default timeout")
+	}
+
+	// With 15 minute timeout, should be stuck
+	result = HandleDrainRetry(ctx, c, node, 900) // 15 minutes
+	if !result.SetDrainStuck {
+		t.Error("expected SetDrainStuck to be true with 15 minute timeout")
+	}
+}
+
+func TestHandleDrainRetry_ZeroTimeoutUsesDefault(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+
+	// 30 minutes into drain - should not be stuck with default timeout
+	drainStart := time.Now().Add(-30 * time.Minute)
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-node",
+			Annotations: map[string]string{
+				annotations.DrainStartedAt: drainStart.Format(time.RFC3339),
+			},
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node).Build()
+	ctx := context.Background()
+
+	// Pass 0 to use default
+	result := HandleDrainRetry(ctx, c, node, 0)
+	if result.SetDrainStuck {
+		t.Error("expected SetDrainStuck to be false when using default timeout")
 	}
 }
 

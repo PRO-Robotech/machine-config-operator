@@ -45,6 +45,15 @@ type RolloutConfig struct {
 	// of total nodes (ex: "10%"). Defaults to 1.
 	// +optional
 	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
+
+	// DrainTimeoutSeconds is the maximum time in seconds to wait for a node drain
+	// to complete before marking it as stuck. The drain will continue retrying.
+	// Defaults to 3600 (1 hour).
+	// +kubebuilder:validation:Minimum=60
+	// +kubebuilder:validation:Maximum=86400
+	// +kubebuilder:default=3600
+	// +optional
+	DrainTimeoutSeconds int `json:"drainTimeoutSeconds,omitempty"`
 }
 
 // RebootPolicy defines the reboot behavior for nodes in the pool.

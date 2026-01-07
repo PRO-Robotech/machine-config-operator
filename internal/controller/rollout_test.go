@@ -389,3 +389,122 @@ func TestSelectNodesForUpdate_PartialUpdate(t *testing.T) {
 		t.Errorf("expected 2 nodes (node-1 already updated), got %d", len(result))
 	}
 }
+
+func TestSelectNodesForUpdate_ExcludesInProgressNodes(t *testing.T) {
+	maxUnavailable := intstr.FromInt(3)
+	pool := &mcov1alpha1.MachineConfigPool{
+		Spec: mcov1alpha1.MachineConfigPoolSpec{
+			Rollout: mcov1alpha1.RolloutConfig{
+				MaxUnavailable: &maxUnavailable,
+			},
+		},
+	}
+	now := time.Now()
+	nodes := []corev1.Node{
+		// Node already cordoned (in-progress) - should NOT be in SelectNodesForUpdate result
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-cordoned", CreationTimestamp: metav1.Time{Time: now}, Annotations: map[string]string{annotations.Cordoned: "true"}}},
+		// Normal nodes that need update
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-2", CreationTimestamp: metav1.Time{Time: now}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-3", CreationTimestamp: metav1.Time{Time: now}}},
+	}
+
+	result := SelectNodesForUpdate(pool, nodes, "rev-1")
+
+	// Should only include node-2 and node-3 (not the cordoned one)
+	if len(result) != 2 {
+		t.Errorf("expected 2 nodes, got %d", len(result))
+	}
+
+	// Verify cordoned node is not included
+	for _, n := range result {
+		if n.Name == "node-cordoned" {
+			t.Error("cordoned node should not be in SelectNodesForUpdate result")
+		}
+	}
+}
+
+func TestCollectNodesInProgress_Empty(t *testing.T) {
+	nodes := []corev1.Node{
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-2"}},
+	}
+
+	result := collectNodesInProgress(nodes, "rev-1")
+	if len(result) != 0 {
+		t.Errorf("expected 0 in-progress nodes, got %d", len(result))
+	}
+}
+
+func TestCollectNodesInProgress_Cordoned(t *testing.T) {
+	nodes := []corev1.Node{
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-cordoned", Annotations: map[string]string{annotations.Cordoned: "true"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-normal"}},
+	}
+
+	result := collectNodesInProgress(nodes, "rev-1")
+	if len(result) != 1 {
+		t.Errorf("expected 1 in-progress node, got %d", len(result))
+	}
+	if result[0].Name != "node-cordoned" {
+		t.Errorf("expected node-cordoned, got %s", result[0].Name)
+	}
+}
+
+func TestCollectNodesInProgress_Draining(t *testing.T) {
+	nodes := []corev1.Node{
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-draining", Annotations: map[string]string{annotations.DrainStartedAt: "2024-01-01T00:00:00Z"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-normal"}},
+	}
+
+	result := collectNodesInProgress(nodes, "rev-1")
+	if len(result) != 1 {
+		t.Errorf("expected 1 in-progress node, got %d", len(result))
+	}
+	if result[0].Name != "node-draining" {
+		t.Errorf("expected node-draining, got %s", result[0].Name)
+	}
+}
+
+func TestCollectNodesInProgress_Applying(t *testing.T) {
+	nodes := []corev1.Node{
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-applying", Annotations: map[string]string{annotations.AgentState: "applying"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-normal"}},
+	}
+
+	result := collectNodesInProgress(nodes, "rev-1")
+	if len(result) != 1 {
+		t.Errorf("expected 1 in-progress node, got %d", len(result))
+	}
+	if result[0].Name != "node-applying" {
+		t.Errorf("expected node-applying, got %s", result[0].Name)
+	}
+}
+
+func TestCollectNodesInProgress_AlreadyAtTarget(t *testing.T) {
+	// Node is cordoned but already at target revision - should NOT be in progress
+	nodes := []corev1.Node{
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-done", Annotations: map[string]string{
+			annotations.Cordoned:        "true",
+			annotations.CurrentRevision: "rev-1",
+		}}},
+	}
+
+	result := collectNodesInProgress(nodes, "rev-1")
+	if len(result) != 0 {
+		t.Errorf("expected 0 in-progress nodes (already at target), got %d", len(result))
+	}
+}
+
+func TestCollectNodesInProgress_Multiple(t *testing.T) {
+	nodes := []corev1.Node{
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-cordoned", Annotations: map[string]string{annotations.Cordoned: "true"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-applying", Annotations: map[string]string{annotations.AgentState: "applying"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-normal"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-done", Annotations: map[string]string{annotations.CurrentRevision: "rev-1"}}},
+	}
+
+	result := collectNodesInProgress(nodes, "rev-1")
+	if len(result) != 2 {
+		t.Errorf("expected 2 in-progress nodes, got %d", len(result))
+	}
+}

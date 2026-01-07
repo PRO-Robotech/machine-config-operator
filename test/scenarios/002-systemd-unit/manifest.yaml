@@ -1,0 +1,56 @@
+---
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfig
+metadata:
+  name: 50-systemd-test
+  labels:
+    mco.in-cloud.io/pool: worker
+spec:
+  priority: 50
+
+  files:
+    # Service unit - simple oneshot that logs a message
+    - path: /etc/systemd/system/mco-test.service
+      content: |
+        [Unit]
+        Description=MCO Lite Test Service
+        Documentation=https://github.com/in-cloud-io/machine-config
+
+        [Service]
+        Type=oneshot
+        ExecStart=/bin/echo "MCO test service executed at $(date)"
+        StandardOutput=journal
+
+        [Install]
+        WantedBy=multi-user.target
+      mode: 0644
+      owner: root:root
+      state: present
+
+    # Timer unit - triggers service every minute
+    - path: /etc/systemd/system/mco-test.timer
+      content: |
+        [Unit]
+        Description=MCO Lite Test Timer
+        Documentation=https://github.com/in-cloud-io/machine-config
+
+        [Timer]
+        OnBootSec=1min
+        OnUnitActiveSec=1min
+        Unit=mco-test.service
+
+        [Install]
+        WantedBy=timers.target
+      mode: 0644
+      owner: root:root
+      state: present
+
+  systemd:
+    units:
+      - name: mco-test.timer
+        enabled: true
+        state: started
+        mask: false
+
+  reboot:
+    required: false

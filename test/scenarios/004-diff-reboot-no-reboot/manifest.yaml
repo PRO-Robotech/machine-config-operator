@@ -1,0 +1,26 @@
+# Scenario 004: Diff-Based Reboot - No Reboot Required
+# This scenario tests that adding a non-reboot file to existing config
+# does NOT trigger reboot (diff-based logic).
+#
+# PREREQUISITE: Run scenario 001 or 002 first to establish baseline config.
+# If no config exists, the test will still pass but with legacy fallback.
+---
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfig
+metadata:
+  name: 004-no-reboot-test
+  labels:
+    mco.in-cloud.io/pool: worker
+spec:
+  priority: 70
+  files:
+    - path: /etc/mco-scenario-004.conf
+      content: |
+        # This file does NOT require reboot
+        scenario=004
+        timestamp=test
+      mode: 0644
+      owner: root:root
+      state: present
+  reboot:
+    required: false

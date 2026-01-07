@@ -107,7 +107,9 @@ func SelectNodesForUpdate(
 		if node.Annotations != nil {
 			current = node.Annotations[annotations.CurrentRevision]
 		}
-		if current != targetRevision {
+		// Only include nodes that are NOT already in progress (cordoned/draining)
+		// Those are handled separately by collectNodesInProgress
+		if current != targetRevision && !IsNodeUnavailable(&node) {
 			needsUpdate = append(needsUpdate, node)
 		}
 	}
@@ -137,4 +139,23 @@ func SelectNodesForUpdate(
 	}
 
 	return needsUpdate[:canUpdateCount]
+}
+
+// collectNodesInProgress returns nodes that are already in the update process
+// (cordoned or draining) and haven't completed their update yet.
+func collectNodesInProgress(allNodes []corev1.Node, targetRevision string) []corev1.Node {
+	var inProgress []corev1.Node
+	for _, node := range allNodes {
+		// Node is in-progress if it's cordoned/draining but not yet at target revision
+		current := ""
+		if node.Annotations != nil {
+			current = node.Annotations[annotations.CurrentRevision]
+		}
+
+		// Include nodes that are unavailable (cordoned/draining/applying) and not yet done
+		if IsNodeUnavailable(&node) && current != targetRevision {
+			inProgress = append(inProgress, node)
+		}
+	}
+	return inProgress
 }

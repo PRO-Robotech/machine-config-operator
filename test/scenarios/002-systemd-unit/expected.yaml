@@ -1,0 +1,49 @@
+# Machine-readable expectations for scenario 002-systemd-unit
+# Used by automated test framework
+
+scenario:
+  name: systemd-unit
+  description: Create and manage systemd timer unit
+  timeout: 90s
+
+# File expectations
+files:
+  - path: /etc/systemd/system/mco-test.service
+    exists: true
+    mode: "644"
+    owner: "root:root"
+    contains:
+      - "[Service]"
+      - "Type=oneshot"
+      - "MCO test service"
+
+  - path: /etc/systemd/system/mco-test.timer
+    exists: true
+    mode: "644"
+    owner: "root:root"
+    contains:
+      - "[Timer]"
+      - "OnBootSec=1min"
+      - "mco-test.service"
+
+# Systemd unit expectations
+systemd:
+  - unit: mco-test.timer
+    enabled: true
+    active: true
+
+  - unit: mco-test.service
+    # Service is oneshot, may not be active between runs
+    enabled: false  # Service doesn't need to be enabled, timer triggers it
+
+# Kubernetes resource expectations
+resources:
+  machineconfig:
+    name: 50-systemd-test
+    exists: true
+
+# Node annotation expectations
+node_annotations:
+  mco.in-cloud.io/agent-state: "idle"
+  mco.in-cloud.io/current-revision:
+    pattern: "^worker-"

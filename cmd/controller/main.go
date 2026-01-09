@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"os"
@@ -25,10 +26,12 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -149,6 +152,27 @@ func main() {
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
+		os.Exit(1)
+	}
+
+	// Register field indexer for Pod.spec.nodeName (required for drain operations).
+	// This enables client.MatchingFields{"spec.nodeName": nodeName} queries.
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&corev1.Pod{},
+		"spec.nodeName",
+		func(obj client.Object) []string {
+			pod, ok := obj.(*corev1.Pod)
+			if !ok {
+				return nil
+			}
+			if pod.Spec.NodeName == "" {
+				return nil
+			}
+			return []string{pod.Spec.NodeName}
+		},
+	); err != nil {
+		setupLog.Error(err, "unable to create pod node name index")
 		os.Exit(1)
 	}
 

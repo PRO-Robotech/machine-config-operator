@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -81,21 +82,6 @@ func getPool(t *testing.T, r *MachineConfigPoolReconciler, name string) *mcov1al
 		t.Fatalf("Failed to get pool %s: %v", name, err)
 	}
 	return pool
-}
-
-func countNodesWithAnnotation(t *testing.T, r *MachineConfigPoolReconciler, key string) int {
-	t.Helper()
-	nodeList := &corev1.NodeList{}
-	if err := r.List(context.Background(), nodeList); err != nil {
-		t.Fatalf("Failed to list nodes: %v", err)
-	}
-	count := 0
-	for _, node := range nodeList.Items {
-		if node.Annotations != nil && node.Annotations[key] != "" {
-			count++
-		}
-	}
-	return count
 }
 
 func countCordonedNodesIntegration(t *testing.T, r *MachineConfigPoolReconciler) int {
@@ -380,7 +366,7 @@ func TestDrainStuck_Condition(t *testing.T) {
 	ctx := context.Background()
 	drainTimeoutSeconds := 60 // 1 minute
 
-	result := HandleDrainRetry(ctx, c, node, drainTimeoutSeconds)
+	result := HandleDrainRetry(ctx, c, node, drainTimeoutSeconds, 0)
 
 	if !result.SetDrainStuck {
 		t.Error("HandleDrainRetry should return SetDrainStuck=true when timeout exceeded")
@@ -398,8 +384,8 @@ func TestDrainStuck_Condition(t *testing.T) {
 	}
 }
 
-// TestSetDrainStuckCondition_Integration tests SetDrainStuckCondition on pool
-// Now also sets Degraded=True per FR-009-AC6
+// TestSetDrainStuckCondition_Integration tests SetDrainStuckCondition on pool.
+// Sets both DrainStuck=True and Degraded=True conditions.
 func TestSetDrainStuckCondition_Integration(t *testing.T) {
 	pool := &mcov1alpha1.MachineConfigPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "worker"},
@@ -407,7 +393,7 @@ func TestSetDrainStuckCondition_Integration(t *testing.T) {
 
 	SetDrainStuckCondition(pool, "Node worker-1 drain timeout")
 
-	// Should have 2 conditions: DrainStuck + Degraded (per FR-009-AC6)
+	// Should have 2 conditions: DrainStuck + Degraded
 	if len(pool.Status.Conditions) != 2 {
 		t.Fatalf("expected 2 conditions (DrainStuck + Degraded), got %d", len(pool.Status.Conditions))
 	}
@@ -431,7 +417,7 @@ func TestSetDrainStuckCondition_Integration(t *testing.T) {
 	}
 
 	if degraded == nil {
-		t.Fatal("expected Degraded condition (FR-009-AC6)")
+		t.Fatal("expected Degraded condition")
 	}
 	if degraded.Status != metav1.ConditionTrue {
 		t.Errorf("expected Degraded True status, got %s", degraded.Status)
@@ -622,4 +608,139 @@ func TestRequeueAfter_Aggregation(t *testing.T) {
 	if result.RequeueAfter == 0 {
 		t.Error("expected non-zero RequeueAfter for in-progress updates")
 	}
+}
+
+// TestDrainBeforeApply_NoDesiredRevisionWhileDraining verifies that desired-revision
+// is NOT set while pods are still being drained from the node.
+func TestDrainBeforeApply_NoDesiredRevisionWhileDraining(t *testing.T) {
+	maxUnavailable := intstr.FromInt(1)
+	pool := &mcov1alpha1.MachineConfigPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "worker",
+		},
+		Spec: mcov1alpha1.MachineConfigPoolSpec{
+			NodeSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"node-role.kubernetes.io/worker": ""},
+			},
+			MachineConfigSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"mco.in-cloud.io/pool": "worker"},
+			},
+			Rollout: mcov1alpha1.RolloutConfig{
+				DebounceSeconds: 0,
+				MaxUnavailable:  &maxUnavailable,
+			},
+		},
+	}
+
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "worker-1",
+			Labels: map[string]string{
+				"node-role.kubernetes.io/worker": "",
+			},
+		},
+	}
+
+	mc := &mcov1alpha1.MachineConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "mc-drain-test",
+			Labels: map[string]string{"mco.in-cloud.io/pool": "worker"},
+		},
+		Spec: mcov1alpha1.MachineConfigSpec{Priority: 50},
+	}
+
+	// Create a pod on the node that will prevent drain from completing
+	// This pod is owned by a ReplicaSet so it's not a DaemonSet/static pod
+	controllerTrue := true
+	blockingPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "blocking-pod",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: "apps/v1",
+					Kind:       "ReplicaSet",
+					Name:       "test-rs",
+					UID:        "test-uid",
+					Controller: &controllerTrue, // Required for HasController() to return true
+				},
+			},
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "worker-1",
+			Containers: []corev1.Container{
+				{Name: "test", Image: "busybox"},
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+		},
+	}
+
+	r := newIntegrationReconciler(pool, node, mc, blockingPod)
+
+	// First reconcile - debounce/RMC creation
+	if err := reconcileN(r, "worker", 1); err != nil {
+		t.Fatalf("Reconcile 1 failed: %v", err)
+	}
+
+	// Second reconcile - cordon node
+	if err := reconcileN(r, "worker", 1); err != nil {
+		t.Fatalf("Reconcile 2 failed: %v", err)
+	}
+
+	// Verify node is cordoned
+	updatedNode := getNode(t, r, "worker-1")
+	if !updatedNode.Spec.Unschedulable {
+		t.Error("node should be cordoned (unschedulable)")
+	}
+
+	// Multiple reconciles - drain should be attempted but pod blocks completion
+	// The key assertion: desired-revision should NOT be set while pod is still present
+	//
+	// NOTE: The fake client immediately deletes pods on eviction, so we need to
+	// recreate the pod after each reconcile to simulate a pod that is being
+	// evicted but hasn't terminated yet (e.g., slow graceful shutdown, PDB blocked).
+	for i := 0; i < 3; i++ {
+		if err := reconcileN(r, "worker", 1); err != nil {
+			t.Fatalf("Reconcile %d failed: %v", i+3, err)
+		}
+
+		// Recreate the pod to simulate it still being present (graceful termination)
+		newPod := blockingPod.DeepCopy()
+		newPod.Name = fmt.Sprintf("blocking-pod-%d", i)
+		newPod.ResourceVersion = ""
+		if err := r.Create(context.Background(), newPod); err != nil {
+			t.Fatalf("Failed to recreate blocking pod: %v", err)
+		}
+
+		// After each reconcile, verify desired-revision is NOT set
+		// (because drain is not complete due to blocking pod being recreated)
+		updatedNode = getNode(t, r, "worker-1")
+		if updatedNode.Annotations[annotations.DesiredRevision] != "" {
+			t.Fatalf("REGRESSION: desired-revision was set while drain is incomplete (reconcile %d)", i+3)
+		}
+	}
+
+	// Delete all pods to allow drain to complete
+	// (the original was already evicted, delete the recreated ones)
+	podList := &corev1.PodList{}
+	if err := r.List(context.Background(), podList); err != nil {
+		t.Fatalf("Failed to list pods: %v", err)
+	}
+	for _, pod := range podList.Items {
+		_ = r.Delete(context.Background(), &pod) // Ignore errors for already-deleted pods
+	}
+
+	// More reconciles - now drain should complete and desired-revision should be set
+	if err := reconcileN(r, "worker", 5); err != nil {
+		t.Fatalf("Reconcile after pod deletion failed: %v", err)
+	}
+
+	updatedNode = getNode(t, r, "worker-1")
+	if updatedNode.Annotations[annotations.DesiredRevision] == "" {
+		t.Error("desired-revision should be set after drain completes")
+	}
+
+	t.Log("Drain-before-apply semantics verified: desired-revision only set after drain complete")
 }

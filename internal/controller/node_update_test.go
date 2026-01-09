@@ -15,7 +15,7 @@ func TestSetDrainStuckCondition(t *testing.T) {
 
 	SetDrainStuckCondition(pool, "Node test-node drain timeout")
 
-	// Should have 2 conditions: DrainStuck and Degraded (per FR-009-AC6)
+	// Should have 2 conditions: DrainStuck and Degraded
 	if len(pool.Status.Conditions) != 2 {
 		t.Fatalf("expected 2 conditions (DrainStuck + Degraded), got %d", len(pool.Status.Conditions))
 	}
@@ -45,9 +45,9 @@ func TestSetDrainStuckCondition(t *testing.T) {
 		t.Errorf("unexpected DrainStuck message: %s", drainStuck.Message)
 	}
 
-	// Check Degraded condition is also set (FR-009-AC6)
+	// Check Degraded condition is also set
 	if degraded == nil {
-		t.Fatal("expected Degraded condition (FR-009-AC6)")
+		t.Fatal("expected Degraded condition")
 	}
 	if degraded.Status != metav1.ConditionTrue {
 		t.Errorf("expected Degraded True status, got %s", degraded.Status)
@@ -99,7 +99,7 @@ func TestSetDrainStuckCondition_UpdatesExisting(t *testing.T) {
 }
 
 // TestSetDrainStuckCondition_NoOverrideDegraded verifies that existing Degraded condition
-// with a different reason is not overridden (AC-3).
+// with a different reason is not overridden.
 func TestSetDrainStuckCondition_NoOverrideDegraded(t *testing.T) {
 	pool := &mcov1alpha1.MachineConfigPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-pool"},
@@ -180,7 +180,14 @@ func TestClearDrainStuckCondition_NoExistingCondition(t *testing.T) {
 
 	ClearDrainStuckCondition(pool)
 
-	if len(pool.Status.Conditions) != 0 {
-		t.Errorf("expected 0 conditions when clearing non-existent, got %d", len(pool.Status.Conditions))
+	// ClearDrainStuckCondition ensures condition exists as False for consistent querying
+	if len(pool.Status.Conditions) != 1 {
+		t.Errorf("expected 1 condition (DrainStuck=False), got %d", len(pool.Status.Conditions))
+	}
+	if pool.Status.Conditions[0].Type != mcov1alpha1.ConditionDrainStuck {
+		t.Errorf("expected DrainStuck condition, got %s", pool.Status.Conditions[0].Type)
+	}
+	if pool.Status.Conditions[0].Status != metav1.ConditionFalse {
+		t.Errorf("expected condition status False, got %s", pool.Status.Conditions[0].Status)
 	}
 }

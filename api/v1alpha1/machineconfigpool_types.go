@@ -54,6 +54,14 @@ type RolloutConfig struct {
 	// +kubebuilder:default=3600
 	// +optional
 	DrainTimeoutSeconds int `json:"drainTimeoutSeconds,omitempty"`
+
+	// DrainRetrySeconds is the interval between drain retry attempts.
+	// If not specified, calculated as max(30, drainTimeoutSeconds/12).
+	// This allows approximately 12 retry attempts before timeout.
+	// +kubebuilder:validation:Minimum=10
+	// +kubebuilder:validation:Maximum=1800
+	// +optional
+	DrainRetrySeconds int `json:"drainRetrySeconds,omitempty"`
 }
 
 // RebootPolicy defines the reboot behavior for nodes in the pool.

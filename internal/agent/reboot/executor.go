@@ -41,7 +41,7 @@ func (e *SystemdExecutor) Execute(ctx context.Context) error {
 
 	// Sync filesystems before reboot
 	logger.Info("syncing filesystems")
-	syscall.Sync()
+	_ = syscall.Sync()
 
 	// Execute reboot via chroot
 	logger.Info("executing systemctl reboot")

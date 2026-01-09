@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -66,7 +67,10 @@ func NewMachineConfigPoolReconciler(c client.Client, scheme *runtime.Scheme) *Ma
 // +kubebuilder:rbac:groups=mco.in-cloud.io,resources=machineconfigpools/finalizers,verbs=update
 // +kubebuilder:rbac:groups=mco.in-cloud.io,resources=machineconfigs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=mco.in-cloud.io,resources=renderedmachineconfigs,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;patch
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;patch;update
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods/eviction,verbs=create
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch;update
 
 // Reconcile handles MachineConfigPool reconciliation.
 func (r *MachineConfigPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -110,8 +114,14 @@ func (r *MachineConfigPoolReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			"totalConflicts", overlap.ConflictCount(),
 			"poolsAffected", conflictingPools)
 	} else {
-		// Reset metrics when no conflicts
-		RecordPoolOverlapMetrics(nil, []string{pool.Name})
+		// Reset metrics when no conflicts - reset all pools to clear any stale metrics
+		// List all pools in cluster to ensure we clear metrics for previously conflicting pools
+		allPoolNames, listErr := r.listAllPoolNames(ctx)
+		if listErr != nil {
+			log.Error(listErr, "failed to list pool names for metrics reset")
+			allPoolNames = []string{pool.Name}
+		}
+		RecordPoolOverlapMetrics(nil, allPoolNames)
 		// Emit PoolOverlapResolved if it was previously overlapping
 		if wasOverlapping {
 			r.events.PoolOverlapResolved(pool)
@@ -148,14 +158,33 @@ func (r *MachineConfigPoolReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	poolSpecHash := ComputePoolSpecHash(pool)
 	shouldProceed, requeueAfter := r.debounce.CheckAndUpdate(pool.Name, hash.Full, poolSpecHash, debounceSeconds)
 	if !shouldProceed {
+		// Even during debounce, we still want to keep PoolOverlap status fresh.
+		// Otherwise overlap conditions can get stuck until debounce completes.
+		if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+			if err := r.Get(ctx, req.NamespacedName, pool); err != nil {
+				return err
+			}
+			ApplyOverlapCondition(pool, overlap)
+			return r.Status().Update(ctx, pool)
+		}); err != nil {
+			log.Error(err, "failed to update overlap condition during debounce")
+		}
+
 		log.Info("debounce active, requeuing", "after", requeueAfter)
 		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 
 	rmc, err := r.ensureRMC(ctx, pool, merged)
 	if err != nil {
+		SetRenderDegradedCondition(pool, err.Error())
+		if updateErr := r.Status().Update(ctx, pool); updateErr != nil {
+			log.Error(updateErr, "failed to update pool status with RenderDegraded")
+		}
 		return ctrl.Result{}, fmt.Errorf("failed to ensure RMC: %w", err)
 	}
+
+	// Clear RenderDegraded on success
+	ClearRenderDegradedCondition(pool)
 
 	// 4. Select nodes for update respecting maxUnavailable
 	// This returns nodes that can START a new update
@@ -203,9 +232,12 @@ func (r *MachineConfigPoolReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		drainTimeoutSeconds = DefaultDrainTimeoutSeconds
 	}
 
+	// Get drain retry interval from spec (0 means auto-calculate)
+	drainRetrySeconds := pool.Spec.Rollout.DrainRetrySeconds
+
 	for i := range nodesToProcess {
 		node := &nodesToProcess[i]
-		result := ProcessNodeUpdate(ctx, r.Client, pool, node, rmc.Name, drainTimeoutSeconds)
+		result := ProcessNodeUpdate(ctx, r.Client, pool, node, rmc.Name, drainTimeoutSeconds, drainRetrySeconds)
 
 		// Emit lifecycle events based on result flags
 		if result.Cordoned {
@@ -240,11 +272,22 @@ func (r *MachineConfigPoolReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	wasNotComplete := pool.Status.UpdatedMachineCount != pool.Status.MachineCount ||
 		pool.Status.ReadyMachineCount != pool.Status.MachineCount
 
+	// Compute status once outside retry loop for event emission
+	applyTimeout := pool.Spec.Rollout.ApplyTimeoutSeconds
+	if applyTimeout <= 0 {
+		applyTimeout = DefaultApplyTimeoutSeconds
+	}
+	aggregatedStatus := AggregateStatus(rmc.Name, nodes, applyTimeout)
+
+	// Track whether rollout just completed for event emission after retry loop
+	var rolloutJustCompleted bool
+
 	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		if err := r.Get(ctx, req.NamespacedName, pool); err != nil {
 			return err
 		}
-		status := AggregateStatus(rmc.Name, nodes)
+		// Recompute status with potentially updated pool spec
+		status := AggregateStatus(rmc.Name, nodes, pool.Spec.Rollout.ApplyTimeoutSeconds)
 		ApplyStatusToPool(pool, status)
 		// Apply overlap condition (adds PoolOverlap and potentially Degraded)
 		ApplyOverlapCondition(pool, overlap)
@@ -253,13 +296,6 @@ func (r *MachineConfigPoolReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		if len(drainStuckNodes) > 0 {
 			msg := fmt.Sprintf("Drain stuck on nodes: %s", strings.Join(drainStuckNodes, ", "))
 			SetDrainStuckCondition(pool, msg)
-			// Emit event for each stuck node
-			for _, nodeName := range drainStuckNodes {
-				r.events.DrainStuck(pool, nodeName)
-			}
-			log.Info("drain stuck detected",
-				"pool", pool.Name,
-				"nodes", drainStuckNodes)
 		} else {
 			ClearDrainStuckCondition(pool)
 		}
@@ -268,17 +304,41 @@ func (r *MachineConfigPoolReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		UpdateCordonedNodesGauge(pool.Name, status.CordonedMachineCount)
 		UpdateDrainingNodesGauge(pool.Name, status.DrainingMachineCount)
 
-		// Emit RolloutComplete if all nodes just became updated and ready
-		if wasNotComplete && status.MachineCount > 0 &&
+		// Track rollout completion for event emission outside retry loop
+		rolloutJustCompleted = wasNotComplete && status.MachineCount > 0 &&
 			status.UpdatedMachineCount == status.MachineCount &&
-			status.ReadyMachineCount == status.MachineCount {
-			r.events.RolloutComplete(pool)
-			log.Info("rollout complete", "pool", pool.Name, "nodes", status.MachineCount)
-		}
+			status.ReadyMachineCount == status.MachineCount
 
 		return r.Status().Update(ctx, pool)
 	}); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to update pool status: %w", err)
+	}
+
+	// Emit DrainStuck events
+	if len(drainStuckNodes) > 0 {
+		for _, nodeName := range drainStuckNodes {
+			r.events.DrainStuck(pool, nodeName)
+		}
+		log.Info("drain stuck detected",
+			"pool", pool.Name,
+			"nodes", drainStuckNodes)
+	}
+
+	// Emit RolloutComplete if all nodes just became updated and ready
+	if rolloutJustCompleted {
+		r.events.RolloutComplete(pool)
+		log.Info("rollout complete", "pool", pool.Name)
+	}
+
+	// Emit ApplyTimeout events
+	if len(aggregatedStatus.TimedOutNodes) > 0 {
+		for _, nodeName := range aggregatedStatus.TimedOutNodes {
+			r.events.ApplyTimeout(pool, nodeName, applyTimeout)
+		}
+		log.Info("apply timeout detected",
+			"pool", pool.Name,
+			"nodes", aggregatedStatus.TimedOutNodes,
+			"timeoutSeconds", applyTimeout)
 	}
 
 	deleted, err := r.cleaner.CleanupOldRMCs(ctx, pool, nodes)
@@ -313,7 +373,10 @@ func (r *MachineConfigPoolReconciler) ensureRMC(
 
 	existing, err := renderer.CheckExistingRMC(ctx, r.Client, rmc)
 	if err != nil {
-		return nil, err
+		// If this is a hash collision, continue into the suffix retry loop below.
+		if !errors.Is(err, renderer.ErrHashCollision) {
+			return nil, err
+		}
 	}
 
 	if existing != nil {
@@ -333,8 +396,39 @@ func (r *MachineConfigPoolReconciler) ensureRMC(
 			}
 			return existing, nil
 		}
-		log.Info("hash collision detected, adding suffix", "rmc", rmc.Name)
-		rmc.Name = rmc.Name + "-1"
+		// Hash collision detected - find an available name with retry loop
+		originalName := rmc.Name
+		log.Info("hash collision detected, trying with suffix",
+			"rmc", originalName,
+			"existingHash", existing.Spec.ConfigHash,
+			"newHash", rmc.Spec.ConfigHash)
+
+		const maxCollisionRetries = 10
+		for suffix := 1; suffix <= maxCollisionRetries; suffix++ {
+			candidateName := fmt.Sprintf("%s-%d", originalName, suffix)
+			candidate := &mcov1alpha1.RenderedMachineConfig{}
+			err := r.Get(ctx, client.ObjectKey{Name: candidateName}, candidate)
+			if err != nil && apierrors.IsNotFound(err) {
+				// Name is available
+				rmc.Name = candidateName
+				log.Info("hash collision resolved",
+					"originalName", originalName,
+					"newName", candidateName)
+				break
+			}
+			if err != nil {
+				return nil, fmt.Errorf("failed to check RMC name availability: %w", err)
+			}
+			// Name exists - check if same hash
+			if candidate.Spec.ConfigHash == rmc.Spec.ConfigHash {
+				// Same config, can reuse
+				return candidate, nil
+			}
+			// Different hash, continue to next suffix
+			if suffix == maxCollisionRetries {
+				return nil, fmt.Errorf("hash collision: exhausted all %d suffix attempts for %s", maxCollisionRetries, originalName)
+			}
+		}
 	}
 
 	if err := ctrl.SetControllerReference(pool, rmc, r.Scheme); err != nil {
@@ -428,4 +522,19 @@ func hasPoolOverlapCondition(pool *mcov1alpha1.MachineConfigPool) bool {
 		}
 	}
 	return false
+}
+
+// listAllPoolNames returns names of all MachineConfigPools in the cluster.
+// Used to reset metrics for all pools when overlap is resolved.
+func (r *MachineConfigPoolReconciler) listAllPoolNames(ctx context.Context) ([]string, error) {
+	pools := &mcov1alpha1.MachineConfigPoolList{}
+	if err := r.List(ctx, pools); err != nil {
+		return nil, err
+	}
+
+	names := make([]string, len(pools.Items))
+	for i, pool := range pools.Items {
+		names[i] = pool.Name
+	}
+	return names, nil
 }

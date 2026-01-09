@@ -54,7 +54,11 @@ type runtimeRMCGetter struct {
 }
 
 // Get retrieves a RenderedMachineConfig by name.
-func (g *runtimeRMCGetter) Get(ctx context.Context, name string, _ metav1.GetOptions) (*mcov1alpha1.RenderedMachineConfig, error) {
+func (g *runtimeRMCGetter) Get(
+	ctx context.Context,
+	name string,
+	_ metav1.GetOptions,
+) (*mcov1alpha1.RenderedMachineConfig, error) {
 	rmc := &mcov1alpha1.RenderedMachineConfig{}
 	// RenderedMachineConfig is cluster-scoped, so Namespace is empty
 	err := g.client.Get(ctx, types.NamespacedName{Name: name}, rmc)

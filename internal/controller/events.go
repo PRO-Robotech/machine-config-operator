@@ -43,6 +43,9 @@ const (
 	// ReasonDrainStuck indicates drain has exceeded timeout.
 	ReasonDrainStuck = "DrainStuck"
 
+	// ReasonApplyTimeout indicates node apply has exceeded timeout.
+	ReasonApplyTimeout = "ApplyTimeout"
+
 	// ReasonDrainComplete indicates drain completed successfully.
 	ReasonDrainComplete = "DrainComplete"
 
@@ -109,6 +112,15 @@ func (e *EventRecorder) DrainStuck(pool *mcov1alpha1.MachineConfigPool, nodeName
 	}
 	e.recorder.Eventf(pool, corev1.EventTypeWarning, ReasonDrainStuck,
 		"Drain stuck on node %s, timeout exceeded", nodeName)
+}
+
+// ApplyTimeout emits a warning event when node apply exceeds timeout.
+func (e *EventRecorder) ApplyTimeout(pool *mcov1alpha1.MachineConfigPool, nodeName string, timeoutSeconds int) {
+	if e.recorder == nil {
+		return
+	}
+	e.recorder.Eventf(pool, corev1.EventTypeWarning, ReasonApplyTimeout,
+		"Node %s apply timeout exceeded (%ds)", nodeName, timeoutSeconds)
 }
 
 // DrainComplete emits a normal event when drain completes successfully.

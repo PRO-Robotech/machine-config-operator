@@ -160,7 +160,13 @@ func TestRMCGetter_Get_OtherError(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithInterceptorFuncs(interceptor.Funcs{
-			Get: func(ctx context.Context, client client.WithWatch, key types.NamespacedName, obj client.Object, opts ...client.GetOption) error {
+			Get: func(
+				ctx context.Context,
+				client client.WithWatch,
+				key types.NamespacedName,
+				obj client.Object,
+				opts ...client.GetOption,
+			) error {
 				return expectedErr
 			},
 		}).
@@ -204,7 +210,13 @@ func TestRMCGetter_Get_ClusterScoped(t *testing.T) {
 		WithScheme(scheme).
 		WithObjects(existingRMC).
 		WithInterceptorFuncs(interceptor.Funcs{
-			Get: func(ctx context.Context, c client.WithWatch, key types.NamespacedName, obj client.Object, opts ...client.GetOption) error {
+			Get: func(
+				ctx context.Context,
+				c client.WithWatch,
+				key types.NamespacedName,
+				obj client.Object,
+				opts ...client.GetOption,
+			) error {
 				capturedKey = key
 				return c.Get(ctx, key, obj, opts...)
 			},

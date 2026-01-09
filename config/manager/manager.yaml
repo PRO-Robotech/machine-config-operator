@@ -50,6 +50,18 @@ spec:
       #             operator: In
       #             values:
       #               - linux
+      # Controller must be able to run on control-plane nodes to avoid deadlock
+      # when all worker nodes are cordoned during rolling updates (maxUnavailable >= worker count).
+      # This is a critical architectural requirement.
+      tolerations:
+      - key: "node-role.kubernetes.io/control-plane"
+        operator: "Exists"
+        effect: "NoSchedule"
+      - key: "node-role.kubernetes.io/master"
+        operator: "Exists"
+        effect: "NoSchedule"
+      # Use high priority to ensure controller is scheduled when resources are constrained
+      priorityClassName: system-cluster-critical
       securityContext:
         # Projects are configured by default to adhere to the "restricted" Pod Security Standards.
         # This ensures that deployments meet the highest security requirements for Kubernetes.
@@ -63,7 +75,9 @@ spec:
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
-        image: mco-controller:latest
+        # NOTE: kustomize replaces this image name via config/manager/kustomization.yaml
+        # (e.g. controller=mco-controller:e2e for E2E tests).
+        image: controller:latest
         imagePullPolicy: Never
         name: manager
         ports: []

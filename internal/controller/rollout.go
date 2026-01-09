@@ -70,6 +70,21 @@ func SortNodesForUpdate(nodes []corev1.Node) {
 
 func IsNodeUnavailable(node *corev1.Node) bool {
 	ann := node.Annotations
+
+	// Paused nodes are NOT counted as unavailable.
+	// They are intentionally paused for maintenance, not failing.
+	// This prevents paused nodes from consuming maxUnavailable slots.
+	// This check MUST be first, before any cordon/drain checks.
+	if ann != nil && annotations.IsNodePaused(ann) {
+		return false
+	}
+
+	// Check for manual cordon (kubectl cordon) - spec.unschedulable
+	// This must be checked BEFORE MCO annotations to respect manual admin action.
+	if node.Spec.Unschedulable {
+		return true
+	}
+
 	if ann == nil {
 		return false
 	}
@@ -103,10 +118,17 @@ func SelectNodesForUpdate(
 ) []corev1.Node {
 	var needsUpdate []corev1.Node
 	for _, node := range allNodes {
-		current := ""
-		if node.Annotations != nil {
-			current = node.Annotations[annotations.CurrentRevision]
+		ann := node.Annotations
+		if ann == nil {
+			ann = make(map[string]string)
 		}
+
+		// Skip paused nodes entirely - they should not be selected for update
+		if annotations.IsNodePaused(ann) {
+			continue
+		}
+
+		current := ann[annotations.CurrentRevision]
 		// Only include nodes that are NOT already in progress (cordoned/draining)
 		// Those are handled separately by collectNodesInProgress
 		if current != targetRevision && !IsNodeUnavailable(&node) {
@@ -146,14 +168,23 @@ func SelectNodesForUpdate(
 func collectNodesInProgress(allNodes []corev1.Node, targetRevision string) []corev1.Node {
 	var inProgress []corev1.Node
 	for _, node := range allNodes {
-		// Node is in-progress if it's cordoned/draining but not yet at target revision
-		current := ""
-		if node.Annotations != nil {
-			current = node.Annotations[annotations.CurrentRevision]
+		ann := node.Annotations
+		if ann == nil {
+			ann = make(map[string]string)
 		}
 
-		// Include nodes that are unavailable (cordoned/draining/applying) and not yet done
-		if IsNodeUnavailable(&node) && current != targetRevision {
+		// Skip paused nodes - they are intentionally paused
+		if annotations.IsNodePaused(ann) {
+			continue
+		}
+
+		// Node is in-progress if it's cordoned/draining but not yet at target revision
+		current := ann[annotations.CurrentRevision]
+
+		// Include nodes that are unavailable (cordoned/draining/applying).
+		// Also include nodes that already reached the target revision but still
+		// need lifecycle cleanup (uncordon + drain annotation cleanup).
+		if IsNodeUnavailable(&node) && (current != targetRevision || ShouldUncordon(&node, targetRevision)) {
 			inProgress = append(inProgress, node)
 		}
 	}

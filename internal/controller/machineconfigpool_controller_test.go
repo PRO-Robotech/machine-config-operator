@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	mcov1alpha1 "in-cloud.io/machine-config/api/v1alpha1"
+	"in-cloud.io/machine-config/internal/renderer"
 	"in-cloud.io/machine-config/pkg/annotations"
 )
 
@@ -474,5 +476,233 @@ func TestMapNodeToPool_WrongType(t *testing.T) {
 
 	if len(requests) != 0 {
 		t.Errorf("mapNodeToPool() with wrong type returned %d requests, want 0", len(requests))
+	}
+}
+
+func TestListAllPoolNames(t *testing.T) {
+	tests := []struct {
+		name     string
+		pools    []client.Object
+		expected []string
+	}{
+		{
+			name:     "no pools",
+			pools:    nil,
+			expected: []string{},
+		},
+		{
+			name: "single pool",
+			pools: []client.Object{
+				&mcov1alpha1.MachineConfigPool{
+					ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+				},
+			},
+			expected: []string{"worker"},
+		},
+		{
+			name: "multiple pools",
+			pools: []client.Object{
+				&mcov1alpha1.MachineConfigPool{
+					ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+				},
+				&mcov1alpha1.MachineConfigPool{
+					ObjectMeta: metav1.ObjectMeta{Name: "master"},
+				},
+				&mcov1alpha1.MachineConfigPool{
+					ObjectMeta: metav1.ObjectMeta{Name: "infra"},
+				},
+			},
+			expected: []string{"worker", "master", "infra"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newReconciler(tt.pools...)
+
+			names, err := r.listAllPoolNames(context.Background())
+			if err != nil {
+				t.Fatalf("listAllPoolNames() error = %v", err)
+			}
+
+			if len(names) != len(tt.expected) {
+				t.Errorf("listAllPoolNames() returned %d names, want %d", len(names), len(tt.expected))
+				return
+			}
+
+			// Check all expected names are present (order may vary)
+			nameSet := make(map[string]bool)
+			for _, n := range names {
+				nameSet[n] = true
+			}
+			for _, exp := range tt.expected {
+				if !nameSet[exp] {
+					t.Errorf("listAllPoolNames() missing expected pool %q", exp)
+				}
+			}
+		})
+	}
+}
+
+// TestEnsureRMC_HashCollision_UsesSuffix tests that hash collision triggers suffix retry loop.
+func TestEnsureRMC_HashCollision_UsesSuffix(t *testing.T) {
+	pool := &mcov1alpha1.MachineConfigPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+		Spec: mcov1alpha1.MachineConfigPoolSpec{
+			MachineConfigSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"mco.in-cloud.io/pool": "worker"},
+			},
+		},
+	}
+
+	// Create merged config - will generate a specific hash
+	merged := &renderer.MergedConfig{
+		Files: []mcov1alpha1.FileSpec{{Path: "/etc/new.conf", Content: "new content"}},
+	}
+
+	// Build expected RMC to get the name
+	expectedRMC := renderer.BuildRMC(pool.Name, merged, pool)
+
+	// Create existing RMC with DIFFERENT hash at the same name
+	existingRMC := &mcov1alpha1.RenderedMachineConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: expectedRMC.Name, // Same name that would be generated
+		},
+		Spec: mcov1alpha1.RenderedMachineConfigSpec{
+			PoolName:   pool.Name,
+			Revision:   "old1234567",
+			ConfigHash: "0000000000000000000000000000000000000000000000000000000000000000", // Different hash (64 chars)
+			Config: mcov1alpha1.RenderedConfig{
+				Files: []mcov1alpha1.FileSpec{{Path: "/etc/old.conf", Content: "old"}},
+			},
+		},
+	}
+
+	r := newReconciler(pool, existingRMC)
+
+	// Call ensureRMC - should trigger collision handling
+	rmc, err := r.ensureRMC(context.Background(), pool, merged)
+	if err != nil {
+		t.Fatalf("ensureRMC() error = %v", err)
+	}
+
+	// Verify new RMC was created with suffix
+	if rmc.Name == existingRMC.Name {
+		t.Errorf("RMC name should have suffix, got %q (same as existing)", rmc.Name)
+	}
+
+	// Verify it has the correct suffix format
+	if !strings.HasPrefix(rmc.Name, "worker-") {
+		t.Errorf("RMC name should start with 'worker-', got %q", rmc.Name)
+	}
+
+	// Verify suffix was added
+	if !strings.HasSuffix(rmc.Name, "-1") {
+		t.Errorf("RMC name should end with '-1' suffix, got %q", rmc.Name)
+	}
+}
+
+// TestEnsureRMC_HashCollision_ReusesMatchingSuffix tests that existing suffix with matching hash is reused
+func TestEnsureRMC_HashCollision_ReusesMatchingSuffix(t *testing.T) {
+	pool := &mcov1alpha1.MachineConfigPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+		Spec: mcov1alpha1.MachineConfigPoolSpec{
+			MachineConfigSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"mco.in-cloud.io/pool": "worker"},
+			},
+		},
+	}
+
+	// Merged config
+	merged := &renderer.MergedConfig{
+		Files: []mcov1alpha1.FileSpec{{Path: "/etc/test.conf", Content: "test content"}},
+	}
+
+	// Build RMC to get expected hash
+	expectedRMC := renderer.BuildRMC(pool.Name, merged, pool)
+
+	// Create existing RMC with OLD hash at base name
+	existingBase := &mcov1alpha1.RenderedMachineConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: expectedRMC.Name,
+		},
+		Spec: mcov1alpha1.RenderedMachineConfigSpec{
+			PoolName:   pool.Name,
+			Revision:   "old1234567",
+			ConfigHash: "0000000000000000000000000000000000000000000000000000000000000000",
+			Config: mcov1alpha1.RenderedConfig{
+				Files: []mcov1alpha1.FileSpec{{Path: "/etc/old.conf", Content: "old"}},
+			},
+		},
+	}
+
+	// Create existing RMC with MATCHING hash at suffix-1
+	existingSuffix := &mcov1alpha1.RenderedMachineConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: expectedRMC.Name + "-1",
+		},
+		Spec: mcov1alpha1.RenderedMachineConfigSpec{
+			PoolName:   pool.Name,
+			Revision:   expectedRMC.Spec.Revision,
+			ConfigHash: expectedRMC.Spec.ConfigHash, // Same hash!
+			Config:     expectedRMC.Spec.Config,
+		},
+	}
+
+	r := newReconciler(pool, existingBase, existingSuffix)
+
+	rmc, err := r.ensureRMC(context.Background(), pool, merged)
+	if err != nil {
+		t.Fatalf("ensureRMC() error = %v", err)
+	}
+
+	// Verify existing suffix RMC was reused
+	if rmc.Name != existingSuffix.Name {
+		t.Errorf("RMC name = %q, want %q (should reuse existing with matching hash)", rmc.Name, existingSuffix.Name)
+	}
+}
+
+// TestEnsureRMC_NoCollision_ReusesExisting tests that matching hash reuses existing without suffix
+func TestEnsureRMC_NoCollision_ReusesExisting(t *testing.T) {
+	pool := &mcov1alpha1.MachineConfigPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+		Spec: mcov1alpha1.MachineConfigPoolSpec{
+			MachineConfigSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"mco.in-cloud.io/pool": "worker"},
+			},
+		},
+	}
+
+	merged := &renderer.MergedConfig{
+		Files: []mcov1alpha1.FileSpec{{Path: "/etc/test.conf", Content: "test content"}},
+	}
+
+	// Build RMC to get expected hash
+	expectedRMC := renderer.BuildRMC(pool.Name, merged, pool)
+
+	// Create existing RMC with SAME hash
+	existingRMC := &mcov1alpha1.RenderedMachineConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: expectedRMC.Name,
+		},
+		Spec: mcov1alpha1.RenderedMachineConfigSpec{
+			PoolName:   pool.Name,
+			Revision:   expectedRMC.Spec.Revision,
+			ConfigHash: expectedRMC.Spec.ConfigHash, // Same hash!
+			Config:     expectedRMC.Spec.Config,
+			Reboot:     expectedRMC.Spec.Reboot,
+		},
+	}
+
+	r := newReconciler(pool, existingRMC)
+
+	rmc, err := r.ensureRMC(context.Background(), pool, merged)
+	if err != nil {
+		t.Fatalf("ensureRMC() error = %v", err)
+	}
+
+	// Verify existing RMC was reused (no suffix)
+	if rmc.Name != existingRMC.Name {
+		t.Errorf("RMC name = %q, want %q (should reuse existing with matching hash)", rmc.Name, existingRMC.Name)
 	}
 }

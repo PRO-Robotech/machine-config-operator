@@ -60,6 +60,10 @@ const (
 
 	// ForceReboot is "true" to force reboot ignoring minInterval.
 	ForceReboot = Prefix + "force-reboot"
+
+	// DesiredRevisionSetAt records when the controller set desired-revision.
+	// Used for apply timeout detection.
+	DesiredRevisionSetAt = Prefix + "desired-revision-set-at"
 )
 
 // Agent state values.

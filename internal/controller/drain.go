@@ -74,6 +74,13 @@ func FilterEvictablePods(pods []corev1.Pod, config DrainConfig) []corev1.Pod {
 	result := make([]corev1.Pod, 0, len(pods))
 
 	for _, pod := range pods {
+		// If a pod is already terminating, treat it as effectively drained.
+		// In envtest (no kubelet), pods may remain with a DeletionTimestamp for a while,
+		// and repeatedly trying to evict them would prevent progress.
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
+
 		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
 			continue
 		}
@@ -160,18 +167,26 @@ type DrainRetryResult struct {
 // DefaultDrainTimeoutSeconds is the default drain timeout (1 hour).
 const DefaultDrainTimeoutSeconds = 3600
 
+// DefaultDrainRetrySeconds is the minimum drain retry interval (30 seconds).
+const DefaultDrainRetrySeconds = 30
+
 // HandleDrainRetry manages drain retry logic and determines if drain is stuck.
 // drainTimeoutSeconds specifies the maximum time before marking drain as stuck.
+// drainRetrySeconds specifies the interval between retry attempts.
 // If drainTimeoutSeconds is 0, DefaultDrainTimeoutSeconds (3600) is used.
-func HandleDrainRetry(ctx context.Context, c client.Client, node *corev1.Node, drainTimeoutSeconds int) DrainRetryResult {
+// If drainRetrySeconds is 0, it is calculated as max(30, drainTimeoutSeconds/12).
+func HandleDrainRetry(ctx context.Context, c client.Client, node *corev1.Node, drainTimeoutSeconds, drainRetrySeconds int) DrainRetryResult {
 	drainStartStr := annotations.GetAnnotation(node.Annotations, annotations.DrainStartedAt)
 	if drainStartStr == "" {
-		return DrainRetryResult{RequeueAfter: time.Minute, SetDrainStuck: false}
+		// First retry - use configured interval or default
+		retryInterval := calculateRetryInterval(drainTimeoutSeconds, drainRetrySeconds)
+		return DrainRetryResult{RequeueAfter: retryInterval, SetDrainStuck: false}
 	}
 
 	drainStart, err := time.Parse(time.RFC3339, drainStartStr)
 	if err != nil {
-		return DrainRetryResult{RequeueAfter: time.Minute, SetDrainStuck: false}
+		retryInterval := calculateRetryInterval(drainTimeoutSeconds, drainRetrySeconds)
+		return DrainRetryResult{RequeueAfter: retryInterval, SetDrainStuck: false}
 	}
 
 	elapsed := time.Since(drainStart)
@@ -185,14 +200,44 @@ func HandleDrainRetry(ctx context.Context, c client.Client, node *corev1.Node, d
 	}
 	drainTimeout := time.Duration(drainTimeoutSeconds) * time.Second
 
-	switch {
-	case elapsed < 10*time.Minute:
-		return DrainRetryResult{RequeueAfter: time.Minute, SetDrainStuck: false}
-	case elapsed < drainTimeout:
-		return DrainRetryResult{RequeueAfter: 5 * time.Minute, SetDrainStuck: false}
-	default:
-		return DrainRetryResult{RequeueAfter: 5 * time.Minute, SetDrainStuck: true}
+	// Calculate retry interval (configurable or auto-calculated)
+	retryInterval := calculateRetryInterval(drainTimeoutSeconds, drainRetrySeconds)
+
+	// Check timeout first to respect user configuration
+	if elapsed >= drainTimeout {
+		return DrainRetryResult{RequeueAfter: retryInterval, SetDrainStuck: true}
 	}
+
+	// Cap requeue to remaining time to avoid overshooting timeout
+	remaining := drainTimeout - elapsed
+	requeue := retryInterval
+	if remaining < requeue {
+		requeue = remaining
+	}
+	if requeue < 10*time.Second {
+		requeue = 10 * time.Second // Minimum 10s to avoid busy-looping
+	}
+
+	return DrainRetryResult{RequeueAfter: requeue, SetDrainStuck: false}
+}
+
+// calculateRetryInterval returns the drain retry interval.
+// If drainRetrySeconds is specified (> 0), it is used directly.
+// Otherwise, it is calculated as max(30, drainTimeoutSeconds/12).
+func calculateRetryInterval(drainTimeoutSeconds, drainRetrySeconds int) time.Duration {
+	if drainRetrySeconds > 0 {
+		return time.Duration(drainRetrySeconds) * time.Second
+	}
+
+	// Auto-calculate: ~12 retries before timeout
+	if drainTimeoutSeconds <= 0 {
+		drainTimeoutSeconds = DefaultDrainTimeoutSeconds
+	}
+	calculated := drainTimeoutSeconds / 12
+	if calculated < DefaultDrainRetrySeconds {
+		calculated = DefaultDrainRetrySeconds
+	}
+	return time.Duration(calculated) * time.Second
 }
 
 func ClearDrainAnnotations(ctx context.Context, c client.Client, node *corev1.Node) error {

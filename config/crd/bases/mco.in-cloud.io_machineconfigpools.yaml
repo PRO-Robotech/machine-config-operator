@@ -216,6 +216,14 @@ spec:
                     maximum: 3600
                     minimum: 0
                     type: integer
+                  drainRetrySeconds:
+                    description: |-
+                      DrainRetrySeconds is the interval between drain retry attempts.
+                      If not specified, calculated as max(30, drainTimeoutSeconds/12).
+                      This allows approximately 12 retry attempts before timeout.
+                    maximum: 1800
+                    minimum: 10
+                    type: integer
                   drainTimeoutSeconds:
                     default: 3600
                     description: |-

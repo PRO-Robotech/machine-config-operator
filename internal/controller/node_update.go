@@ -30,7 +30,9 @@ type NodeUpdateResult struct {
 
 // ProcessNodeUpdate handles the node update lifecycle: cordon -> drain -> set revision -> uncordon.
 // drainTimeoutSeconds specifies the maximum time before marking drain as stuck.
+// drainRetrySeconds specifies the interval between drain retry attempts.
 // If drainTimeoutSeconds is 0, DefaultDrainTimeoutSeconds (3600) is used.
+// If drainRetrySeconds is 0, it is calculated as max(30, drainTimeoutSeconds/12).
 func ProcessNodeUpdate(
 	ctx context.Context,
 	c client.Client,
@@ -38,6 +40,7 @@ func ProcessNodeUpdate(
 	node *corev1.Node,
 	targetRevision string,
 	drainTimeoutSeconds int,
+	drainRetrySeconds int,
 ) NodeUpdateResult {
 	logger := log.FromContext(ctx)
 
@@ -71,7 +74,7 @@ func ProcessNodeUpdate(
 	if !complete {
 		if err := DrainNode(ctx, c, node, drainConfig); err != nil {
 			logger.Info("drain incomplete, scheduling retry", "node", node.Name, "error", err)
-			retry := HandleDrainRetry(ctx, c, node, drainTimeoutSeconds)
+			retry := HandleDrainRetry(ctx, c, node, drainTimeoutSeconds, drainRetrySeconds)
 
 			result := NodeUpdateResult{
 				Result:     ctrl.Result{RequeueAfter: retry.RequeueAfter},
@@ -87,12 +90,11 @@ func ProcessNodeUpdate(
 			}
 			return result
 		}
-		// Drain in progress but making progress - check if this is first drain call
-		if !drainWasStarted {
-			return NodeUpdateResult{
-				Result:       ctrl.Result{RequeueAfter: 5 * time.Second},
-				DrainStarted: true,
-			}
+		// Drain making progress but not complete - always return and requeue
+		// This prevents falling through to set desired-revision while pods are still draining
+		return NodeUpdateResult{
+			Result:       ctrl.Result{RequeueAfter: 5 * time.Second},
+			DrainStarted: !drainWasStarted, // true only on first call
 		}
 	}
 
@@ -104,6 +106,10 @@ func ProcessNodeUpdate(
 		if err := SetNodeAnnotation(ctx, c, node, annotations.DesiredRevision, targetRevision); err != nil {
 			logger.Error(err, "failed to set desired revision", "node", node.Name)
 			return NodeUpdateResult{Result: ctrl.Result{RequeueAfter: 5 * time.Second}}
+		}
+		// Record when we set the desired revision for apply timeout detection
+		if err := SetNodeAnnotation(ctx, c, node, annotations.DesiredRevisionSetAt, time.Now().UTC().Format(time.RFC3339)); err != nil {
+			logger.Error(err, "failed to set desired-revision-set-at", "node", node.Name)
 		}
 		if err := SetNodeAnnotation(ctx, c, node, annotations.Pool, pool.Name); err != nil {
 			logger.Error(err, "failed to set pool annotation", "node", node.Name)
@@ -137,7 +143,7 @@ func ProcessNodeUpdate(
 	return NodeUpdateResult{Result: ctrl.Result{RequeueAfter: 10 * time.Second}}
 }
 
-// SetDrainStuckCondition sets DrainStuck=True and also Degraded=True (per FR-009-AC6).
+// SetDrainStuckCondition sets DrainStuck=True and also Degraded=True.
 func SetDrainStuckCondition(pool *mcov1alpha1.MachineConfigPool, message string) {
 	condition := metav1.Condition{
 		Type:               mcov1alpha1.ConditionDrainStuck,
@@ -190,13 +196,21 @@ func setDegradedForDrainStuck(pool *mcov1alpha1.MachineConfigPool) {
 }
 
 func ClearDrainStuckCondition(pool *mcov1alpha1.MachineConfigPool) {
+	condition := metav1.Condition{
+		Type:               mcov1alpha1.ConditionDrainStuck,
+		Status:             metav1.ConditionFalse,
+		Reason:             "DrainComplete",
+		Message:            "",
+		LastTransitionTime: metav1.Now(),
+	}
+
 	for i, c := range pool.Status.Conditions {
 		if c.Type == mcov1alpha1.ConditionDrainStuck {
-			pool.Status.Conditions[i].Status = metav1.ConditionFalse
-			pool.Status.Conditions[i].Reason = "DrainComplete"
-			pool.Status.Conditions[i].Message = ""
-			pool.Status.Conditions[i].LastTransitionTime = metav1.Now()
+			pool.Status.Conditions[i] = condition
 			return
 		}
 	}
+
+	// Ensure the condition exists
+	pool.Status.Conditions = append(pool.Status.Conditions, condition)
 }

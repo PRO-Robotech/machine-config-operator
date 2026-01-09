@@ -19,6 +19,7 @@ package controller
 import (
 	"fmt"
 	"sort"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -26,6 +27,9 @@ import (
 	mcov1alpha1 "in-cloud.io/machine-config/api/v1alpha1"
 	"in-cloud.io/machine-config/pkg/annotations"
 )
+
+// DefaultApplyTimeoutSeconds is the default timeout for node apply operations.
+const DefaultApplyTimeoutSeconds = 600
 
 // AggregatedStatus contains the computed pool status derived from node states.
 type AggregatedStatus struct {
@@ -40,15 +44,25 @@ type AggregatedStatus struct {
 	PendingRebootCount      int
 	CordonedMachineCount    int
 	DrainingMachineCount    int
+	TimedOutNodes           []string // Nodes that exceeded apply timeout
 	Conditions              []metav1.Condition
 }
 
 // AggregateStatus computes pool status from node states.
-func AggregateStatus(target string, nodes []corev1.Node) *AggregatedStatus {
+// applyTimeoutSeconds specifies the maximum time a node can be in applying state.
+// If 0, DefaultApplyTimeoutSeconds is used.
+func AggregateStatus(target string, nodes []corev1.Node, applyTimeoutSeconds int) *AggregatedStatus {
 	status := &AggregatedStatus{
 		TargetRevision: target,
 		MachineCount:   len(nodes),
 	}
+
+	// Use default if not specified
+	timeout := applyTimeoutSeconds
+	if timeout <= 0 {
+		timeout = DefaultApplyTimeoutSeconds
+	}
+	timeoutDuration := time.Duration(timeout) * time.Second
 
 	revisionCounts := make(map[string]int)
 
@@ -73,11 +87,16 @@ func AggregateStatus(target string, nodes []corev1.Node) *AggregatedStatus {
 			}
 		}
 
+		// Check for apply timeout
 		if state == annotations.StateApplying {
-			status.UpdatingMachineCount++
-		}
-
-		if state == annotations.StateError {
+			if isApplyTimedOut(nodeAnnotations, timeoutDuration) {
+				// Timed out nodes count as degraded, not updating
+				status.DegradedMachineCount++
+				status.TimedOutNodes = append(status.TimedOutNodes, node.Name)
+			} else {
+				status.UpdatingMachineCount++
+			}
+		} else if state == annotations.StateError {
 			status.DegradedMachineCount++
 		}
 
@@ -105,6 +124,23 @@ func AggregateStatus(target string, nodes []corev1.Node) *AggregatedStatus {
 	status.Conditions = computeConditions(status)
 
 	return status
+}
+
+// isApplyTimedOut checks if a node's apply operation has exceeded the timeout.
+func isApplyTimedOut(nodeAnnotations map[string]string, timeout time.Duration) bool {
+	setAtStr := annotations.GetAnnotation(nodeAnnotations, annotations.DesiredRevisionSetAt)
+	if setAtStr == "" {
+		// No timestamp, can't determine timeout
+		return false
+	}
+
+	setAt, err := time.Parse(time.RFC3339, setAtStr)
+	if err != nil {
+		// Invalid timestamp, can't determine timeout
+		return false
+	}
+
+	return time.Since(setAt) > timeout
 }
 
 func computeCurrentRevision(counts map[string]int, target string) string {
@@ -158,7 +194,9 @@ func computeConditions(status *AggregatedStatus) []metav1.Condition {
 		})
 	}
 
-	if status.UpdatedMachineCount < status.MachineCount && status.DegradedMachineCount == 0 {
+	// Updating is True when there are nodes not yet at target revision.
+	// Degraded nodes don't affect this - we still show update progress.
+	if status.UpdatedMachineCount < status.MachineCount {
 		conditions = append(conditions, metav1.Condition{
 			Type:               mcov1alpha1.ConditionUpdating,
 			Status:             metav1.ConditionTrue,
@@ -210,6 +248,15 @@ func ApplyStatusToPool(pool *mcov1alpha1.MachineConfigPool, status *AggregatedSt
 	pool.Status.PendingRebootCount = status.PendingRebootCount
 	pool.Status.CordonedMachineCount = status.CordonedMachineCount
 	pool.Status.DrainingMachineCount = status.DrainingMachineCount
+
+	// Update LastSuccessfulRevision when all nodes are successfully updated
+	// with no degraded or pending-reboot nodes
+	if status.MachineCount > 0 &&
+		status.UpdatedMachineCount == status.MachineCount &&
+		status.DegradedMachineCount == 0 &&
+		status.PendingRebootCount == 0 {
+		pool.Status.LastSuccessfulRevision = status.TargetRevision
+	}
 
 	pool.Status.Conditions = mergeConditions(pool.Status.Conditions, status.Conditions)
 }
@@ -316,6 +363,56 @@ func ApplyOverlapCondition(pool *mcov1alpha1.MachineConfigPool, overlap *Overlap
 	if overlapCondition.Status == metav1.ConditionTrue {
 		setDegradedForOverlap(pool)
 	}
+}
+
+// SetRenderDegradedCondition sets RenderDegraded=True and Degraded=True when RMC creation fails.
+func SetRenderDegradedCondition(pool *mcov1alpha1.MachineConfigPool, message string) {
+	now := metav1.Now()
+
+	// Set RenderDegraded=True
+	setCondition(pool, metav1.Condition{
+		Type:               mcov1alpha1.ConditionRenderDegraded,
+		Status:             metav1.ConditionTrue,
+		Reason:             "RenderFailed",
+		Message:            message,
+		LastTransitionTime: now,
+	})
+
+	// Also set Degraded=True
+	setCondition(pool, metav1.Condition{
+		Type:               mcov1alpha1.ConditionDegraded,
+		Status:             metav1.ConditionTrue,
+		Reason:             "RenderDegraded",
+		Message:            "RMC creation failed: " + message,
+		LastTransitionTime: now,
+	})
+}
+
+// ClearRenderDegradedCondition sets RenderDegraded=False after successful RMC creation.
+func ClearRenderDegradedCondition(pool *mcov1alpha1.MachineConfigPool) {
+	now := metav1.Now()
+
+	setCondition(pool, metav1.Condition{
+		Type:               mcov1alpha1.ConditionRenderDegraded,
+		Status:             metav1.ConditionFalse,
+		Reason:             "RenderSuccess",
+		Message:            "RMC created successfully",
+		LastTransitionTime: now,
+	})
+}
+
+// setCondition updates or adds a condition in the pool's status.
+func setCondition(pool *mcov1alpha1.MachineConfigPool, condition metav1.Condition) {
+	for i, c := range pool.Status.Conditions {
+		if c.Type == condition.Type {
+			if c.Status == condition.Status {
+				condition.LastTransitionTime = c.LastTransitionTime
+			}
+			pool.Status.Conditions[i] = condition
+			return
+		}
+	}
+	pool.Status.Conditions = append(pool.Status.Conditions, condition)
 }
 
 // setDegradedForOverlap sets Degraded=True due to pool overlap.

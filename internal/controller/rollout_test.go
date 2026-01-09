@@ -508,3 +508,430 @@ func TestCollectNodesInProgress_Multiple(t *testing.T) {
 		t.Errorf("expected 2 in-progress nodes, got %d", len(result))
 	}
 }
+
+func TestIsNodeUnavailable_PausedNotUnavailable(t *testing.T) {
+	// Paused nodes should NOT be counted as unavailable.
+	// This prevents paused nodes from consuming maxUnavailable slots.
+	tests := []struct {
+		name        string
+		annotations map[string]string
+		expected    bool
+	}{
+		{
+			name: "paused node is not unavailable",
+			annotations: map[string]string{
+				annotations.Paused: "true",
+			},
+			expected: false,
+		},
+		{
+			name: "paused + cordoned is not unavailable (pause takes precedence)",
+			annotations: map[string]string{
+				annotations.Paused:   "true",
+				annotations.Cordoned: "true",
+			},
+			expected: false,
+		},
+		{
+			name: "paused + draining is not unavailable",
+			annotations: map[string]string{
+				annotations.Paused:         "true",
+				annotations.DrainStartedAt: "2024-01-01T00:00:00Z",
+			},
+			expected: false,
+		},
+		{
+			name: "paused + applying is not unavailable",
+			annotations: map[string]string{
+				annotations.Paused:     "true",
+				annotations.AgentState: "applying",
+			},
+			expected: false,
+		},
+		{
+			name: "paused + revision mismatch is not unavailable",
+			annotations: map[string]string{
+				annotations.Paused:          "true",
+				annotations.CurrentRevision: "rev-1",
+				annotations.DesiredRevision: "rev-2",
+			},
+			expected: false,
+		},
+		{
+			name: "not paused, cordoned is unavailable",
+			annotations: map[string]string{
+				annotations.Cordoned: "true",
+			},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{Annotations: tt.annotations},
+			}
+			result := IsNodeUnavailable(node)
+			if result != tt.expected {
+				t.Errorf("expected %v, got %v", tt.expected, result)
+			}
+		})
+	}
+}
+
+func TestSelectNodesForUpdate_SkipsPausedNodes(t *testing.T) {
+	// Paused nodes should be completely skipped from update selection.
+	// They should not be selected for update regardless of their revision.
+	maxUnavailable := intstr.FromInt(3)
+	pool := &mcov1alpha1.MachineConfigPool{
+		Spec: mcov1alpha1.MachineConfigPoolSpec{
+			Rollout: mcov1alpha1.RolloutConfig{
+				MaxUnavailable: &maxUnavailable,
+			},
+		},
+	}
+	now := time.Now()
+	nodes := []corev1.Node{
+		// Paused node that needs update - should be skipped
+		{ObjectMeta: metav1.ObjectMeta{
+			Name:              "node-paused",
+			CreationTimestamp: metav1.Time{Time: now},
+			Annotations:       map[string]string{annotations.Paused: "true"},
+		}},
+		// Normal nodes that need update
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-2", CreationTimestamp: metav1.Time{Time: now}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-3", CreationTimestamp: metav1.Time{Time: now}}},
+	}
+
+	result := SelectNodesForUpdate(pool, nodes, "rev-1")
+
+	// Should only include node-2 and node-3 (not the paused one)
+	if len(result) != 2 {
+		t.Errorf("expected 2 nodes, got %d", len(result))
+	}
+
+	// Verify paused node is not included
+	for _, n := range result {
+		if n.Name == "node-paused" {
+			t.Error("paused node should not be selected for update")
+		}
+	}
+}
+
+func TestSelectNodesForUpdate_PausedDoesNotConsumeMaxUnavailable(t *testing.T) {
+	// Paused nodes should NOT count against maxUnavailable limit.
+	// This allows rollout to continue for other nodes even when some are paused.
+	maxUnavailable := intstr.FromInt(1)
+	pool := &mcov1alpha1.MachineConfigPool{
+		Spec: mcov1alpha1.MachineConfigPoolSpec{
+			Rollout: mcov1alpha1.RolloutConfig{
+				MaxUnavailable: &maxUnavailable,
+			},
+		},
+	}
+	now := time.Now()
+	nodes := []corev1.Node{
+		// Paused node - should NOT count as unavailable
+		{ObjectMeta: metav1.ObjectMeta{
+			Name:              "node-paused",
+			CreationTimestamp: metav1.Time{Time: now},
+			Annotations:       map[string]string{annotations.Paused: "true"},
+		}},
+		// Normal node that needs update
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-2", CreationTimestamp: metav1.Time{Time: now}}},
+		// Another normal node
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-3", CreationTimestamp: metav1.Time{Time: now}}},
+	}
+
+	result := SelectNodesForUpdate(pool, nodes, "rev-1")
+
+	// With maxUnavailable=1 and no unavailable nodes (paused doesn't count),
+	// we should get 1 node selected for update
+	if len(result) != 1 {
+		t.Errorf("expected 1 node (maxUnavailable=1), got %d", len(result))
+	}
+}
+
+func TestCollectNodesInProgress_SkipsPausedNodes(t *testing.T) {
+	// Paused nodes should not be collected as in-progress,
+	// even if they have cordoned/draining annotations.
+	nodes := []corev1.Node{
+		// Paused + cordoned - should NOT be collected
+		{ObjectMeta: metav1.ObjectMeta{
+			Name: "node-paused-cordoned",
+			Annotations: map[string]string{
+				annotations.Paused:   "true",
+				annotations.Cordoned: "true",
+			},
+		}},
+		// Normal cordoned - should be collected
+		{ObjectMeta: metav1.ObjectMeta{
+			Name:        "node-cordoned",
+			Annotations: map[string]string{annotations.Cordoned: "true"},
+		}},
+		// Normal node
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-normal"}},
+	}
+
+	result := collectNodesInProgress(nodes, "rev-1")
+
+	if len(result) != 1 {
+		t.Errorf("expected 1 in-progress node, got %d", len(result))
+	}
+	if len(result) > 0 && result[0].Name != "node-cordoned" {
+		t.Errorf("expected node-cordoned, got %s", result[0].Name)
+	}
+}
+
+func TestRollingUpdate_ContinuesPastPausedNodes(t *testing.T) {
+	// Integration test: rolling update should continue even when
+	// some nodes are paused. Paused nodes are completely excluded
+	// from the rollout calculation.
+	maxUnavailable := intstr.FromInt(2)
+	pool := &mcov1alpha1.MachineConfigPool{
+		Spec: mcov1alpha1.MachineConfigPoolSpec{
+			Rollout: mcov1alpha1.RolloutConfig{
+				MaxUnavailable: &maxUnavailable,
+			},
+		},
+	}
+	now := time.Now()
+	nodes := []corev1.Node{
+		// 2 paused nodes - should be completely ignored
+		{ObjectMeta: metav1.ObjectMeta{
+			Name:              "node-paused-1",
+			CreationTimestamp: metav1.Time{Time: now},
+			Annotations:       map[string]string{annotations.Paused: "true"},
+		}},
+		{ObjectMeta: metav1.ObjectMeta{
+			Name:              "node-paused-2",
+			CreationTimestamp: metav1.Time{Time: now},
+			Annotations:       map[string]string{annotations.Paused: "true"},
+		}},
+		// 1 node already applying - counts as unavailable
+		{ObjectMeta: metav1.ObjectMeta{
+			Name:              "node-applying",
+			CreationTimestamp: metav1.Time{Time: now},
+			Annotations:       map[string]string{annotations.AgentState: "applying"},
+		}},
+		// 3 nodes ready for update
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-ready-1", CreationTimestamp: metav1.Time{Time: now}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-ready-2", CreationTimestamp: metav1.Time{Time: now}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-ready-3", CreationTimestamp: metav1.Time{Time: now}}},
+	}
+
+	result := SelectNodesForUpdate(pool, nodes, "rev-1")
+
+	// With maxUnavailable=2, and 1 applying node:
+	// - Paused nodes don't count as unavailable
+	// - 1 slot is used by applying node
+	// - 1 slot available for new updates
+	// So we should select 1 node
+	if len(result) != 1 {
+		t.Errorf("expected 1 node (2 max - 1 applying, paused ignored), got %d", len(result))
+	}
+
+	// Verify no paused nodes in result
+	for _, n := range result {
+		if n.Name == "node-paused-1" || n.Name == "node-paused-2" {
+			t.Errorf("paused node %s should not be in result", n.Name)
+		}
+	}
+}
+
+func TestIsNodeUnavailable_ManualCordon(t *testing.T) {
+	// Node with Spec.Unschedulable=true (kubectl cordon) should be unavailable
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker-1"},
+		Spec: corev1.NodeSpec{
+			Unschedulable: true,
+		},
+	}
+
+	if !IsNodeUnavailable(node) {
+		t.Error("manually cordoned node (Unschedulable=true) should be unavailable")
+	}
+}
+
+func TestIsNodeUnavailable_ManualCordonNoAnnotations(t *testing.T) {
+	// Node with Spec.Unschedulable=true and no annotations
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "worker-1",
+			// No annotations at all
+		},
+		Spec: corev1.NodeSpec{
+			Unschedulable: true,
+		},
+	}
+
+	if !IsNodeUnavailable(node) {
+		t.Error("manually cordoned node without annotations should be unavailable")
+	}
+}
+
+func TestIsNodeUnavailable_NotCordoned(t *testing.T) {
+	// Normal node - not cordoned
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "worker-1",
+			Annotations: map[string]string{
+				annotations.AgentState: annotations.StateIdle,
+			},
+		},
+		Spec: corev1.NodeSpec{
+			Unschedulable: false,
+		},
+	}
+
+	if IsNodeUnavailable(node) {
+		t.Error("normal node should not be unavailable")
+	}
+}
+
+// TestIsNodeUnavailable_PausedAndUnschedulable verifies that paused nodes are NOT
+// counted as unavailable even when Spec.Unschedulable=true.
+func TestIsNodeUnavailable_PausedAndUnschedulable(t *testing.T) {
+	// A paused node that was cordoned (Unschedulable=true) should NOT be unavailable
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "paused-cordoned-worker",
+			Annotations: map[string]string{
+				annotations.Paused: "true",
+			},
+		},
+		Spec: corev1.NodeSpec{
+			Unschedulable: true, // Cordoned
+		},
+	}
+
+	if IsNodeUnavailable(node) {
+		t.Error("paused node with Unschedulable=true should NOT be unavailable")
+	}
+}
+
+// TestIsNodeUnavailable_PausedAndMCOCordoned verifies paused nodes with MCO cordon annotation.
+func TestIsNodeUnavailable_PausedAndMCOCordoned(t *testing.T) {
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "paused-mco-cordoned",
+			Annotations: map[string]string{
+				annotations.Paused:   "true",
+				annotations.Cordoned: "true",
+			},
+		},
+		Spec: corev1.NodeSpec{
+			Unschedulable: true,
+		},
+	}
+
+	if IsNodeUnavailable(node) {
+		t.Error("paused node with MCO cordoned annotation should NOT be unavailable")
+	}
+}
+
+// TestIsNodeUnavailable_PausedAndDraining verifies paused nodes during drain.
+func TestIsNodeUnavailable_PausedAndDraining(t *testing.T) {
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "paused-draining",
+			Annotations: map[string]string{
+				annotations.Paused:         "true",
+				annotations.DrainStartedAt: "2026-01-08T12:00:00Z",
+			},
+		},
+		Spec: corev1.NodeSpec{
+			Unschedulable: true,
+		},
+	}
+
+	if IsNodeUnavailable(node) {
+		t.Error("paused node with drain-started-at annotation should NOT be unavailable")
+	}
+}
+
+// TestIsNodeUnavailable_PausedAndApplying verifies paused nodes with agent applying.
+func TestIsNodeUnavailable_PausedAndApplying(t *testing.T) {
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "paused-applying",
+			Annotations: map[string]string{
+				annotations.Paused:     "true",
+				annotations.AgentState: "applying",
+			},
+		},
+	}
+
+	if IsNodeUnavailable(node) {
+		t.Error("paused node with agent-state=applying should NOT be unavailable")
+	}
+}
+
+func TestSelectNodesForUpdate_RespectsManualCordon(t *testing.T) {
+	// Manual cordon should count against maxUnavailable
+	maxUnavailable := intstr.FromInt(2)
+	pool := &mcov1alpha1.MachineConfigPool{
+		Spec: mcov1alpha1.MachineConfigPoolSpec{
+			Rollout: mcov1alpha1.RolloutConfig{
+				MaxUnavailable: &maxUnavailable,
+			},
+		},
+	}
+	now := time.Now()
+	nodes := []corev1.Node{
+		// Manually cordoned node - counts as unavailable
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "node-manual-cordon", CreationTimestamp: metav1.Time{Time: now}},
+			Spec:       corev1.NodeSpec{Unschedulable: true},
+		},
+		// MCO cordoned node - also counts as unavailable
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "node-mco-cordon",
+				CreationTimestamp: metav1.Time{Time: now},
+				Annotations:       map[string]string{annotations.Cordoned: "true"},
+			},
+		},
+		// Normal nodes needing update
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-ready-1", CreationTimestamp: metav1.Time{Time: now}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-ready-2", CreationTimestamp: metav1.Time{Time: now}}},
+	}
+
+	result := SelectNodesForUpdate(pool, nodes, "rev-1")
+
+	// maxUnavailable=2, 2 are already unavailable (manual + MCO cordon)
+	// So no new nodes should be selected
+	if len(result) != 0 {
+		t.Errorf("expected nil or empty (maxUnavailable reached), got %d nodes", len(result))
+	}
+}
+
+func TestSelectNodesForUpdate_ManualCordonPartialCapacity(t *testing.T) {
+	// One manual cordon leaves room for one more update
+	maxUnavailable := intstr.FromInt(2)
+	pool := &mcov1alpha1.MachineConfigPool{
+		Spec: mcov1alpha1.MachineConfigPoolSpec{
+			Rollout: mcov1alpha1.RolloutConfig{
+				MaxUnavailable: &maxUnavailable,
+			},
+		},
+	}
+	now := time.Now()
+	nodes := []corev1.Node{
+		// Manually cordoned node - counts as unavailable
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "node-manual-cordon", CreationTimestamp: metav1.Time{Time: now}},
+			Spec:       corev1.NodeSpec{Unschedulable: true},
+		},
+		// Normal nodes needing update
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-ready-1", CreationTimestamp: metav1.Time{Time: now}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-ready-2", CreationTimestamp: metav1.Time{Time: now}}},
+	}
+
+	result := SelectNodesForUpdate(pool, nodes, "rev-1")
+
+	// maxUnavailable=2, 1 manual cordon leaves room for 1 update
+	if len(result) != 1 {
+		t.Errorf("expected 1 node (maxUnavailable=2, 1 manual cordon), got %d", len(result))
+	}
+}

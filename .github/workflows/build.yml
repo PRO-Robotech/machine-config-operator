@@ -35,7 +35,7 @@ jobs:
           file: ./Dockerfile.agent
           push: true
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/machine-config-agent:${{ github.head_ref || github.ref_name }}-${{ steps.short-sha.outputs.sha }}
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64 #,linux/arm64
 
       - name: Build and push controller
         uses: docker/build-push-action@v6
@@ -44,4 +44,4 @@ jobs:
           file: ./Dockerfile.controller
           push: true
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/machine-config-operator:${{ github.head_ref || github.ref_name }}-${{ steps.short-sha.outputs.sha }}
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64 #,linux/arm64

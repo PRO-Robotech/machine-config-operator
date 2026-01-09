@@ -1,0 +1,57 @@
+# Multiple pools for different node roles
+# Demonstrates non-overlapping node selectors
+---
+# Master/Control-plane pool
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfigPool
+metadata:
+  name: master
+spec:
+  nodeSelector:
+    matchLabels:
+      node-role.kubernetes.io/control-plane: ""
+  machineConfigSelector:
+    matchLabels:
+      mco.in-cloud.io/pool: master
+  rollout:
+    maxUnavailable: 1
+    debounceSeconds: 60
+  reboot:
+    strategy: Never
+---
+# Worker pool
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfigPool
+metadata:
+  name: worker
+spec:
+  nodeSelector:
+    matchLabels:
+      node-role.kubernetes.io/worker: ""
+  machineConfigSelector:
+    matchLabels:
+      mco.in-cloud.io/pool: worker
+  rollout:
+    maxUnavailable: 2
+    debounceSeconds: 30
+  reboot:
+    strategy: Never
+---
+# GPU pool for ML workloads
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfigPool
+metadata:
+  name: gpu
+spec:
+  nodeSelector:
+    matchLabels:
+      nvidia.com/gpu: "true"
+  machineConfigSelector:
+    matchLabels:
+      mco.in-cloud.io/pool: gpu
+  rollout:
+    maxUnavailable: 1
+  reboot:
+    # GPU drivers may require reboot
+    strategy: IfRequired
+

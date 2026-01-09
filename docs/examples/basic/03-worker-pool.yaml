@@ -1,68 +1,21 @@
-# =============================================================================
-# Worker Node Pool
-# =============================================================================
-#
-# This example creates a MachineConfigPool for worker nodes.
-#
-# What it does:
-#   - Groups nodes with label "node-role.kubernetes.io/worker"
-#   - Applies MachineConfigs with label "mco.in-cloud.io/pool: worker"
-#   - Configures rollout and reboot behavior
-#
-# Prerequisites:
-#   - At least one node with label "node-role.kubernetes.io/worker"
-#   - To add label: kubectl label node NODE_NAME node-role.kubernetes.io/worker=""
-#
-# Apply:
-#   kubectl apply -f 03-worker-pool.yaml
-#
-# Verify:
-#   kubectl get mcp worker
-#   kubectl describe mcp worker
-#
-# =============================================================================
-
+# Basic worker pool configuration
+# Selects nodes with node-role.kubernetes.io/worker label
 apiVersion: mco.in-cloud.io/v1alpha1
 kind: MachineConfigPool
 metadata:
   name: worker
 spec:
-  # Select nodes that belong to this pool
-  # All nodes with this label will be managed by this pool
   nodeSelector:
     matchLabels:
       node-role.kubernetes.io/worker: ""
-
-  # Select MachineConfigs that apply to this pool
-  # All MCs with this label will be merged and applied to nodes
   machineConfigSelector:
     matchLabels:
       mco.in-cloud.io/pool: worker
-
-  # Rollout configuration
   rollout:
-    # Wait 30 seconds after config change before rendering
-    # Prevents rapid re-renders when multiple MCs change
+    maxUnavailable: 1
     debounceSeconds: 30
-
-    # Maximum time to wait for a node to apply config
-    # Node is marked degraded if it doesn't complete in time
-    applyTimeoutSeconds: 600
-
-  # Reboot policy
   reboot:
-    # Never: Nodes never reboot automatically
-    # IfRequired: Nodes reboot when MC requires it
     strategy: Never
-
-    # Minimum time between reboots (only for IfRequired)
-    # Prevents reboot storms
-    minIntervalSeconds: 1800
-
-  # How many old RenderedMachineConfigs to keep
   revisionHistory:
     limit: 5
 
-  # Set to true to pause all operations
-  # Useful for maintenance or troubleshooting
-  paused: false

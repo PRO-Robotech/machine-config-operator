@@ -1,0 +1,31 @@
+# Production rolling update configuration
+# Conservative settings for zero-downtime updates
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfigPool
+metadata:
+  name: production-workers
+spec:
+  nodeSelector:
+    matchLabels:
+      node-role.kubernetes.io/worker: ""
+      environment: production
+  machineConfigSelector:
+    matchLabels:
+      mco.in-cloud.io/pool: production
+  rollout:
+    # Update one node at a time (safest)
+    maxUnavailable: 1
+    
+    # Alternative: update 25% of nodes at a time
+    # maxUnavailable: "25%"
+    
+    # Large debounce for production stability
+    debounceSeconds: 60
+    
+    # Extended timeouts for production workloads
+    applyTimeoutSeconds: 900      # 15 minutes for apply
+    drainTimeoutSeconds: 7200     # 2 hours for drain
+    drainRetrySeconds: 300        # Retry every 5 minutes
+  reboot:
+    strategy: Never
+

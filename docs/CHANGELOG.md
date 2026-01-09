@@ -7,15 +7,56 @@
 
 ---
 
-## [Unreleased]
+## [0.1.2] - 2026-01-09
+
+### Summary
+
+Релиз стабилизации, исправляющий баги, выявленные при E2E тестировании, и улучшающий документацию.
+
+### Исправлено
+
+- **Drain Timeout Grace Period** — исправлена ошибка, при которой hardcoded 10-минутная проверка игнорировала `drainTimeoutSeconds` < 600s
+  - Timeout теперь проверяется корректно согласно конфигурации
+  - Retry intervals пропорциональны configured timeout
+  - Добавлен minimum requeue floor (30s) для предотвращения busy-looping
+
+- **Paused Node Unavailable Count** — исправлена ошибка, при которой паузированные ноды неправильно считались unavailable
+  - Pause check теперь выполняется перед cordon/drain проверками
+  - Паузированные ноды больше не потребляют `maxUnavailable` слоты
+
+- **Duplicate Events in Retry Loop** — события `DrainStuck` и `RolloutComplete` больше не дублируются при retry
+
+- **Hash Collision Dead Code** — исправлена обработка hash collision при создании RMC
+  - При коллизии теперь создаётся RMC с suffix вместо RenderDegraded
+
+- **Controller Tolerations** — контроллер теперь может запускаться на control-plane нодах
+  - Добавлены tolerations для `node-role.kubernetes.io/control-plane` и `master`
+  - Используется `priorityClassName: system-cluster-critical`
+  - Решает проблему deadlock когда все worker ноды cordoned
+
+- **RBAC for Events** — добавлены права на создание Kubernetes Events
+
+- **E2E Test Cleanup** — улучшена очистка ресурсов между тестами
+  - Добавлен `cleanupAllMCOResources()` helper
+  - Ноды uncordon после каждого теста
+  - Удаляются MCO аннотации
 
 ### Добавлено
-- Пользовательская документация на русском языке
-- Примеры манифестов с комментариями
+
+- Конфигурируемый `drainRetrySeconds` для интервала retry drain
+- `lastSuccessfulRevision` в статусе пула
+- `desiredRevisionSetAt` аннотация для timeout detection
+
+### Документация
+
+- Полностью переработана пользовательская документация
+- Добавлен глоссарий терминов
+- Добавлена документация E2E тестов
+- Добавлены диаграммы взаимодействий
 
 ---
 
-## [0.1.1] - 2025-01-07
+## [0.1.1] - 2026-01-07
 
 ### Summary
 
@@ -24,45 +65,48 @@
 ### Добавлено
 
 #### Rolling Update
+
 - **maxUnavailable** — контроль количества нод, которые могут быть unavailable во время обновления
   - Поддержка абсолютных значений (1, 2, 3) и процентов ("25%", "50%")
   - По умолчанию: 1 (последовательное обновление)
   - Использует ceiling для вычисления процентов
 
 #### Cordon/Drain/Uncordon
+
 - **Node Cordoning** — ноды помечаются unschedulable перед обновлением
 - **Pod Eviction** — graceful eviction подов с учётом PDB
 - **Drain Retry** — автоматический retry с exponential backoff
 - **Uncordon on Complete** — автоматический uncordon после успешного обновления
 
 #### Pool Overlap Validation
+
 - **Overlap Detection** — обнаружение нод, матчащих несколько пулов
 - **PoolOverlap Condition** — condition для статуса overlap
 - **Conflict Blocking** — блокировка обновлений для конфликтующих нод
 
 #### Status & Conditions
+
 - **cordonedMachineCount** — количество cordoned нод в пуле
 - **drainingMachineCount** — количество нод в процессе drain
 - **DrainStuck Condition** — индикация превышения timeout drain
 - **Degraded Condition** — мета-condition для здоровья пула
 
 #### Metrics
+
 - `mco_drain_duration_seconds` — гистограмма времени drain
 - `mco_drain_stuck_total` — счётчик событий drain timeout
 - `mco_cordoned_nodes` — gauge cordoned нод по пулам
 - `mco_draining_nodes` — gauge draining нод по пулам
 - `mco_pool_overlap_nodes_total` — gauge нод в overlap конфликте
 
-#### Documentation
-- API Reference для v0.1.1
-- Troubleshooting Guide
-
 ### Изменено
-- **RolloutConfig** — расширен полями maxUnavailable
+
+- **RolloutConfig** — расширен полями maxUnavailable, drainTimeoutSeconds
 - **Status Aggregation** — добавлен подсчёт cordon/drain
 - **Condition Management** — добавлены DrainStuck и PoolOverlap conditions
 
 ### Breaking Changes
+
 - Нет. v0.1.1 полностью обратно совместим с v0.1.0.
 
 ---
@@ -70,6 +114,7 @@
 ## [0.1.0] - 2026-01-04
 
 ### Добавлено
+
 - Первоначальная реализация MCO Lite
 - CRD: MachineConfig, MachineConfigPool, RenderedMachineConfig
 - Controller с компонентами:
@@ -84,6 +129,7 @@
 - Debounce для предотвращения частых ре-рендеров
 
 ### Известные ограничения
+
 - Нет поддержки drop-in файлов для systemd
 - Нет интеграции с внешними секретами
 - Только Linux-ноды
@@ -103,7 +149,7 @@ v0.1.1 полностью обратно совместим. Изменения 
 ```yaml
 spec:
   rollout:
-    maxUnavailable: 1      # NEW: Контроль параллелизма
+    maxUnavailable: 1      # Контроль параллелизма
     debounceSeconds: 30    # Existing
 ```
 
@@ -140,43 +186,81 @@ groups:
           summary: "Nodes in multiple pools detected"
 ```
 
-#### Действий не требуется для
-- Существующих MachineConfig ресурсов
-- Существующих MachineConfigPool ресурсов (применяются defaults)
-- Node annotations (новые аннотации аддитивны)
-- Конфигурации Agent DaemonSet
+### From v0.1.1 to v0.1.2
+
+v0.1.2 полностью обратно совместим. Исправления багов применяются автоматически.
+
+#### Рекомендации
+
+1. **Пересоздать controller deployment** для получения новых tolerations:
+
+```bash
+kubectl rollout restart deployment -n mco-system mco-controller
+```
+
+2. **Настроить drainRetrySeconds** при необходимости:
+
+```yaml
+spec:
+  rollout:
+    drainTimeoutSeconds: 3600
+    drainRetrySeconds: 300    # Retry каждые 5 минут
+```
 
 ---
 
-## API Changes
+## API Changes Summary
 
-### MachineConfigPoolSpec
+### v0.1.1 → v0.1.2
 
-| Поле | Изменение | Описание |
-|------|-----------|----------|
-| `spec.rollout.maxUnavailable` | ADDED | IntOrString, default: 1 |
+#### MachineConfigPoolSpec.Rollout
 
-### MachineConfigPoolStatus
+| Field | Change | Description |
+|-------|--------|-------------|
+| `drainRetrySeconds` | ADDED | Interval between drain retries |
 
-| Поле | Изменение | Описание |
-|------|-----------|----------|
-| `status.cordonedMachineCount` | ADDED | int32 |
-| `status.drainingMachineCount` | ADDED | int32 |
+#### MachineConfigPoolStatus
 
-### Conditions
+| Field | Change | Description |
+|-------|--------|-------------|
+| `lastSuccessfulRevision` | ADDED | Last successfully applied revision |
 
-| Type | Изменение | Описание |
-|------|-----------|----------|
-| `PoolOverlap` | ADDED | Обнаружение overlap |
+#### Node Annotations
+
+| Annotation | Change | Description |
+|------------|--------|-------------|
+| `mco.in-cloud.io/desired-revision-set-at` | ADDED | Timestamp for timeout detection |
+
+### v0.1.0 → v0.1.1
+
+#### MachineConfigPoolSpec.Rollout
+
+| Field | Change | Description |
+|-------|--------|-------------|
+| `maxUnavailable` | ADDED | IntOrString, default: 1 |
+| `drainTimeoutSeconds` | ADDED | int, default: 3600 |
+
+#### MachineConfigPoolStatus
+
+| Field | Change | Description |
+|-------|--------|-------------|
+| `cordonedMachineCount` | ADDED | int32 |
+| `drainingMachineCount` | ADDED | int32 |
+
+#### Conditions
+
+| Type | Change | Description |
+|------|--------|-------------|
+| `PoolOverlap` | ADDED | Overlap detection |
 | `DrainStuck` | ADDED | Drain timeout |
 
-### Node Annotations
+#### Node Annotations
 
-| Annotation | Изменение | Описание |
-|------------|-----------|----------|
-| `mco.in-cloud.io/cordoned` | ADDED | Статус cordon |
-| `mco.in-cloud.io/drain-started-at` | ADDED | Время начала drain |
-| `mco.in-cloud.io/drain-retry-count` | ADDED | Счётчик retry |
+| Annotation | Change | Description |
+|------------|--------|-------------|
+| `mco.in-cloud.io/cordoned` | ADDED | Cordon status |
+| `mco.in-cloud.io/drain-started-at` | ADDED | Drain start time |
+| `mco.in-cloud.io/drain-retry-count` | ADDED | Retry count |
 
 ---
 
@@ -188,3 +272,4 @@ groups:
 - **Удалено** — удалённые функции
 - **Исправлено** — исправления ошибок
 - **Безопасность** — исправления уязвимостей
+

@@ -1,0 +1,27 @@
+# Drain configuration for stateful workloads
+# Extended timeouts for databases and stateful applications
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfigPool
+metadata:
+  name: stateful-workers
+spec:
+  nodeSelector:
+    matchLabels:
+      workload: stateful
+  machineConfigSelector:
+    matchLabels:
+      mco.in-cloud.io/pool: stateful
+  rollout:
+    maxUnavailable: 1
+    
+    # Long timeout for stateful workloads (4 hours)
+    # Allows time for graceful shutdown of databases
+    drainTimeoutSeconds: 14400
+    
+    # Frequent retries for faster progress when pods terminate
+    drainRetrySeconds: 60
+    
+    debounceSeconds: 30
+  reboot:
+    strategy: Never
+

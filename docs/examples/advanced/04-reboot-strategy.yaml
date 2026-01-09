@@ -1,0 +1,43 @@
+# Reboot strategy examples
+# Demonstrates configurations that require reboot
+---
+# MachineConfig that requires reboot
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfig
+metadata:
+  name: kernel-tuning
+  labels:
+    mco.in-cloud.io/pool: worker
+spec:
+  priority: 60
+  files:
+    - path: /etc/sysctl.d/99-hugepages.conf
+      content: |
+        # Hugepages for databases
+        vm.nr_hugepages = 1024
+      mode: 420
+  reboot:
+    required: true
+    reason: "Hugepages require reboot to take effect"
+---
+# Pool with automatic reboot enabled (for development)
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfigPool
+metadata:
+  name: dev-workers
+spec:
+  nodeSelector:
+    matchLabels:
+      environment: development
+  machineConfigSelector:
+    matchLabels:
+      mco.in-cloud.io/pool: dev
+  rollout:
+    maxUnavailable: 2
+    debounceSeconds: 10
+  reboot:
+    # Automatically reboot when MachineConfig requires it
+    strategy: IfRequired
+    # Minimum 10 minutes between reboots
+    minIntervalSeconds: 600
+

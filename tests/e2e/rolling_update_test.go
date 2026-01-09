@@ -28,7 +28,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"in-cloud.io/machine-config/test/utils"
+	"in-cloud.io/machine-config/tests/testutil"
 )
 
 var _ = Describe("Rolling Update", Ordered, func() {
@@ -40,12 +40,15 @@ var _ = Describe("Rolling Update", Ordered, func() {
 	BeforeAll(func() {
 		ctx = context.Background()
 
+		// Clean up any leftover resources from previous test runs
+		cleanupAllMCOResources()
+
 		By("ensuring worker nodes are labeled")
 		nodes, err := getWorkerNodes()
 		if err != nil || len(nodes) == 0 {
 			cmd := exec.Command("kubectl", "get", "nodes", "-o", "name")
-			output, _ := utils.Run(cmd)
-			nodeNames := utils.GetNonEmptyLines(output)
+			output, _ := testutil.Run(cmd)
+			nodeNames := testutil.GetNonEmptyLines(output)
 			for i, name := range nodeNames {
 				if i > 0 {
 					nodeName := name[5:] // strip "node/"
@@ -79,7 +82,7 @@ spec:
       mco.in-cloud.io/pool: %s
   rollout:
     maxUnavailable: 1
-    debounceSeconds: 5
+    debounceSeconds: 1
   reboot:
     strategy: Never
   paused: false
@@ -90,11 +93,12 @@ spec:
 			By("waiting for pool to be ready")
 			Eventually(func() (bool, error) {
 				return isPoolUpdated(ctx, poolName)
-			}, 60*time.Second, 5*time.Second).Should(BeTrue())
+			}, 60*time.Second, 2*time.Second).Should(BeTrue())
 		})
 
 		AfterEach(func() {
 			_ = deleteResource("mc", "e2e-test-mc")
+			uncordonAllWorkerNodes()
 		})
 
 		It("should update nodes sequentially", func() {
@@ -119,23 +123,16 @@ spec:
 `, poolName, time.Now().Format(time.RFC3339))
 			Expect(applyYAML(yaml)).To(Succeed())
 
-			By("verifying at most 1 node is cordoned at a time")
-			maxCordoned := 0
-			for i := 0; i < 30; i++ {
-				count, err := getCordonedNodeCount(ctx, poolName)
-				if err == nil && count > maxCordoned {
-					maxCordoned = count
-				}
-				if count > 1 {
-					Fail(fmt.Sprintf("Expected at most 1 cordoned node, got %d", count))
-				}
-				time.Sleep(2 * time.Second)
-			}
+			By("verifying at most 1 node is cordoned at a time during rollout")
+			Consistently(func() (int, error) {
+				return getCordonedNodeCount(ctx, poolName)
+			}, 30*time.Second, 1*time.Second).Should(BeNumerically("<=", 1),
+				"at most 1 node should be cordoned at a time")
 
 			By("waiting for rollout to complete")
 			Eventually(func() (bool, error) {
 				return isPoolUpdated(ctx, poolName)
-			}, 5*time.Minute, 10*time.Second).Should(BeTrue())
+			}, 5*time.Minute, 2*time.Second).Should(BeTrue())
 		})
 	})
 
@@ -156,7 +153,7 @@ spec:
       mco.in-cloud.io/pool: %s
   rollout:
     maxUnavailable: 2
-    debounceSeconds: 5
+    debounceSeconds: 1
   reboot:
     strategy: Never
   paused: false
@@ -165,11 +162,12 @@ spec:
 
 			Eventually(func() (bool, error) {
 				return isPoolUpdated(ctx, poolName)
-			}, 60*time.Second, 5*time.Second).Should(BeTrue())
+			}, 60*time.Second, 2*time.Second).Should(BeTrue())
 		})
 
 		AfterEach(func() {
 			_ = deleteResource("mc", "e2e-test-mc-2")
+			uncordonAllWorkerNodes()
 		})
 
 		It("should update up to 2 nodes in parallel", func() {
@@ -194,19 +192,16 @@ spec:
 `, poolName, time.Now().Format(time.RFC3339))
 			Expect(applyYAML(yaml)).To(Succeed())
 
-			By("verifying at most 2 nodes are cordoned at a time")
-			for i := 0; i < 30; i++ {
-				count, err := getCordonedNodeCount(ctx, poolName)
-				if err == nil && count > 2 {
-					Fail(fmt.Sprintf("Expected at most 2 cordoned nodes, got %d", count))
-				}
-				time.Sleep(2 * time.Second)
-			}
+			By("verifying at most 2 nodes are cordoned at a time during rollout")
+			Consistently(func() (int, error) {
+				return getCordonedNodeCount(ctx, poolName)
+			}, 30*time.Second, 1*time.Second).Should(BeNumerically("<=", 2),
+				"at most 2 nodes should be cordoned at a time")
 
 			By("waiting for rollout to complete")
 			Eventually(func() (bool, error) {
 				return isPoolUpdated(ctx, poolName)
-			}, 5*time.Minute, 10*time.Second).Should(BeTrue())
+			}, 5*time.Minute, 2*time.Second).Should(BeTrue())
 		})
 	})
 
@@ -227,7 +222,7 @@ spec:
       mco.in-cloud.io/pool: %s
   rollout:
     maxUnavailable: "50%%"
-    debounceSeconds: 5
+    debounceSeconds: 1
   reboot:
     strategy: Never
   paused: false
@@ -236,11 +231,12 @@ spec:
 
 			Eventually(func() (bool, error) {
 				return isPoolUpdated(ctx, poolName)
-			}, 60*time.Second, 5*time.Second).Should(BeTrue())
+			}, 60*time.Second, 2*time.Second).Should(BeTrue())
 		})
 
 		AfterEach(func() {
 			_ = deleteResource("mc", "e2e-test-mc-pct")
+			uncordonAllWorkerNodes()
 		})
 
 		It("should update ceil(50%*N) nodes", func() {
@@ -268,7 +264,7 @@ spec:
 			By("waiting for rollout to complete")
 			Eventually(func() (bool, error) {
 				return isPoolUpdated(ctx, poolName)
-			}, 5*time.Minute, 10*time.Second).Should(BeTrue())
+			}, 5*time.Minute, 2*time.Second).Should(BeTrue())
 		})
 	})
 
@@ -289,7 +285,7 @@ spec:
       mco.in-cloud.io/pool: %s
   rollout:
     maxUnavailable: 1
-    debounceSeconds: 5
+    debounceSeconds: 1
   reboot:
     strategy: Never
   paused: true
@@ -299,6 +295,7 @@ spec:
 
 		AfterEach(func() {
 			_ = deleteResource("mc", "e2e-test-mc-paused")
+			uncordonAllWorkerNodes()
 		})
 
 		It("should not update any nodes", func() {
@@ -324,7 +321,7 @@ spec:
 			By("verifying no nodes are cordoned")
 			Consistently(func() (int, error) {
 				return getCordonedNodeCount(ctx, poolName)
-			}, 30*time.Second, 5*time.Second).Should(Equal(0))
+			}, 30*time.Second, 2*time.Second).Should(Equal(0))
 		})
 	})
 })

@@ -421,7 +421,7 @@ scenario_header() {
 }
 
 # =============================================================================
-# Reboot assertions (STORY-066)
+# Reboot assertions
 # =============================================================================
 assert_reboot_pending() {
     local expected="${1:-true}"

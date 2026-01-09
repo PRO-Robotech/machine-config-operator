@@ -1,3 +1,5 @@
+//go:build e2e
+
 /*
 Copyright 2026.
 
@@ -14,7 +16,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package utils
+// Package testutil provides utilities for E2E testing.
+package testutil
 
 import (
 	"bufio"
@@ -163,12 +166,24 @@ func GetNonEmptyLines(output string) []string {
 	return res
 }
 
-// GetProjectDir will return the directory where the project is
+// GetProjectDir will return the directory where the project is.
+// Uses git rev-parse to reliably find the project root, with fallback
+// to path manipulation for environments without git.
 func GetProjectDir() (string, error) {
+	// Try git rev-parse first (most reliable)
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	output, err := cmd.Output()
+	if err == nil {
+		return strings.TrimSpace(string(output)), nil
+	}
+
+	// Fallback: use working directory path manipulation
 	wd, err := os.Getwd()
 	if err != nil {
 		return wd, fmt.Errorf("failed to get current working directory: %w", err)
 	}
+	// Handle both old and new paths for backward compatibility
+	wd = strings.ReplaceAll(wd, "/tests/e2e", "")
 	wd = strings.ReplaceAll(wd, "/test/e2e", "")
 	return wd, nil
 }

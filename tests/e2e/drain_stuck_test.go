@@ -28,27 +28,30 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"in-cloud.io/machine-config/test/utils"
+	"in-cloud.io/machine-config/tests/testutil"
 )
 
 var _ = Describe("Drain Stuck", Ordered, func() {
 	var (
-		ctx          context.Context
-		poolName     = "drain-test-workers"
-		pdbName      = "blocking-pdb"
-		deployName   = "blocking-app"
-		testNode     string
-		testNs       = "default"
+		ctx        context.Context
+		poolName   = "drain-test-workers"
+		pdbName    = "blocking-pdb"
+		deployName = "blocking-app"
+		testNode   string
+		testNs     = "default"
 	)
 
 	BeforeAll(func() {
 		ctx = context.Background()
 
+		// Clean up any leftover resources from previous test runs
+		cleanupAllMCOResources()
+
 		By("getting a worker node for drain test")
 		cmd := exec.Command("kubectl", "get", "nodes", "-o", "name")
-		output, err := utils.Run(cmd)
+		output, err := testutil.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
-		nodeNames := utils.GetNonEmptyLines(output)
+		nodeNames := testutil.GetNonEmptyLines(output)
 		Expect(len(nodeNames)).To(BeNumerically(">=", 2), "Need at least 2 nodes")
 
 		testNode = nodeNames[1][5:] // strip "node/", use second node
@@ -67,12 +70,28 @@ var _ = Describe("Drain Stuck", Ordered, func() {
 		_ = unlabelNode(testNode, "node-role.kubernetes.io/drain-test")
 
 		By("uncordoning test node if cordoned")
-		cmd := exec.Command("kubectl", "uncordon", testNode)
-		_, _ = utils.Run(cmd)
+		_ = uncordonNode(testNode)
 	})
 
 	Context("when PDB blocks drain", func() {
 		BeforeEach(func() {
+			By("ensuring no old pods exist from previous test")
+			// Wait for any old pods to be fully deleted to avoid race conditions.
+			// The AfterEach deletes resources but doesn't wait for pods to terminate.
+			Eventually(func() (int, error) {
+				cmd := exec.Command("kubectl", "get", "pods", "-l", "app="+deployName,
+					"-o", "jsonpath={.items}", "-n", testNs)
+				output, err := testutil.Run(cmd)
+				if err != nil {
+					return 0, err
+				}
+				if output == "" || output == "[]" {
+					return 0, nil
+				}
+				// Count non-empty items
+				return len(output), nil
+			}, 30*time.Second, 1*time.Second).Should(Equal(0), "old pods should be deleted")
+
 			By("creating blocking deployment on test node")
 			yaml := fmt.Sprintf(`
 apiVersion: apps/v1
@@ -104,8 +123,8 @@ spec:
 			Eventually(func() (string, error) {
 				cmd := exec.Command("kubectl", "get", "pods", "-l", "app="+deployName,
 					"-o", "jsonpath={.items[0].status.phase}", "-n", testNs)
-				return utils.Run(cmd)
-			}, 60*time.Second, 5*time.Second).Should(Equal("Running"))
+				return testutil.Run(cmd)
+			}, 60*time.Second, 2*time.Second).Should(Equal("Running"))
 
 			By("creating PDB that blocks eviction")
 			yaml = fmt.Sprintf(`
@@ -137,7 +156,9 @@ spec:
       mco.in-cloud.io/pool: %s
   rollout:
     maxUnavailable: 1
-    debounceSeconds: 5
+    debounceSeconds: 1
+    drainTimeoutSeconds: 60
+    drainRetrySeconds: 10
   reboot:
     strategy: Never
 `, poolName, poolName)
@@ -151,8 +172,7 @@ spec:
 			_ = deleteResource("deployment", deployName)
 
 			By("uncordoning test node")
-			cmd := exec.Command("kubectl", "uncordon", testNode)
-			_, _ = utils.Run(cmd)
+			_ = uncordonNode(testNode)
 		})
 
 		It("should set DrainStuck condition after timeout", func() {
@@ -180,7 +200,7 @@ spec:
 			By("waiting for DrainStuck condition")
 			Eventually(func() (string, error) {
 				return getPoolCondition(ctx, poolName, "DrainStuck")
-			}, 120*time.Second, 10*time.Second).Should(Equal("True"))
+			}, 120*time.Second, 2*time.Second).Should(Equal("True"))
 		})
 
 		It("should clear DrainStuck when blocker is removed", func() {
@@ -208,15 +228,19 @@ spec:
 			By("waiting for DrainStuck to be set")
 			Eventually(func() (string, error) {
 				return getPoolCondition(ctx, poolName, "DrainStuck")
-			}, 120*time.Second, 10*time.Second).Should(Equal("True"))
+			}, 120*time.Second, 2*time.Second).Should(Equal("True"))
 
 			By("deleting PDB to unblock drain")
 			Expect(deleteResource("pdb", pdbName)).To(Succeed())
 
-			By("waiting for DrainStuck to clear")
+			By("waiting for DrainStuck to clear (after drain retries)")
+			// After PDB is removed, controller needs time to:
+			// 1. Retry drain (which should now succeed)
+			// 2. Clear the DrainStuck condition
+			// The retry interval is 30s by default, so we need to wait longer
 			Eventually(func() (string, error) {
 				return getPoolCondition(ctx, poolName, "DrainStuck")
-			}, 120*time.Second, 10*time.Second).Should(Equal("False"))
+			}, 180*time.Second, 2*time.Second).Should(Equal("False"))
 		})
 	})
 
@@ -237,7 +261,9 @@ spec:
       mco.in-cloud.io/pool: %s
   rollout:
     maxUnavailable: 1
-    debounceSeconds: 5
+    debounceSeconds: 1
+    drainTimeoutSeconds: 60
+    drainRetrySeconds: 10
   reboot:
     strategy: Never
 `, poolName, poolName)
@@ -249,8 +275,7 @@ spec:
 			_ = deleteResource("mcp", poolName)
 
 			By("uncordoning test node")
-			cmd := exec.Command("kubectl", "uncordon", testNode)
-			_, _ = utils.Run(cmd)
+			_ = uncordonNode(testNode)
 		})
 
 		It("should complete without DrainStuck", func() {
@@ -278,7 +303,7 @@ spec:
 			By("waiting for pool to be updated")
 			Eventually(func() (bool, error) {
 				return isPoolUpdated(ctx, poolName)
-			}, 3*time.Minute, 10*time.Second).Should(BeTrue())
+			}, 3*time.Minute, 2*time.Second).Should(BeTrue())
 
 			By("verifying DrainStuck is not set")
 			cond, err := getPoolCondition(ctx, poolName, "DrainStuck")

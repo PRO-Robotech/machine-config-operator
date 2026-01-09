@@ -28,7 +28,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"in-cloud.io/machine-config/test/utils"
+	"in-cloud.io/machine-config/tests/testutil"
 )
 
 var _ = Describe("Pool Overlap", Ordered, func() {
@@ -42,11 +42,14 @@ var _ = Describe("Pool Overlap", Ordered, func() {
 	BeforeAll(func() {
 		ctx = context.Background()
 
+		// Clean up any leftover resources from previous test runs
+		cleanupAllMCOResources()
+
 		By("getting a worker node for overlap test")
 		cmd := exec.Command("kubectl", "get", "nodes", "-o", "name")
-		output, err := utils.Run(cmd)
+		output, err := testutil.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
-		nodeNames := utils.GetNonEmptyLines(output)
+		nodeNames := testutil.GetNonEmptyLines(output)
 		Expect(len(nodeNames)).To(BeNumerically(">=", 2), "Need at least 2 nodes")
 
 		testNode = nodeNames[1][5:] // strip "node/", use second node
@@ -82,7 +85,7 @@ spec:
       mco.in-cloud.io/pool: %s
   rollout:
     maxUnavailable: 1
-    debounceSeconds: 5
+    debounceSeconds: 1
   reboot:
     strategy: Never
 `, workersPool, workersPool)
@@ -103,7 +106,7 @@ spec:
       mco.in-cloud.io/pool: %s
   rollout:
     maxUnavailable: 1
-    debounceSeconds: 5
+    debounceSeconds: 1
   reboot:
     strategy: Never
 `, infraPool, infraPool)
@@ -119,19 +122,19 @@ spec:
 			By("waiting for PoolOverlap condition on workers pool")
 			Eventually(func() (string, error) {
 				return getPoolCondition(ctx, workersPool, "PoolOverlap")
-			}, 60*time.Second, 5*time.Second).Should(Equal("True"))
+			}, 60*time.Second, 2*time.Second).Should(Equal("True"))
 
 			By("verifying PoolOverlap on infra pool")
 			Eventually(func() (string, error) {
 				return getPoolCondition(ctx, infraPool, "PoolOverlap")
-			}, 60*time.Second, 5*time.Second).Should(Equal("True"))
+			}, 60*time.Second, 2*time.Second).Should(Equal("True"))
 		})
 
 		It("should clear overlap when conflict is resolved", func() {
 			By("waiting for overlap to be detected first")
 			Eventually(func() (string, error) {
 				return getPoolCondition(ctx, workersPool, "PoolOverlap")
-			}, 60*time.Second, 5*time.Second).Should(Equal("True"))
+			}, 60*time.Second, 2*time.Second).Should(Equal("True"))
 
 			By("removing the conflicting label from node")
 			Expect(unlabelNode(testNode, "role2")).To(Succeed())
@@ -139,7 +142,7 @@ spec:
 			By("waiting for PoolOverlap to clear on workers pool")
 			Eventually(func() (string, error) {
 				return getPoolCondition(ctx, workersPool, "PoolOverlap")
-			}, 60*time.Second, 5*time.Second).Should(Equal("False"))
+			}, 60*time.Second, 2*time.Second).Should(Equal("False"))
 		})
 	})
 
@@ -164,7 +167,7 @@ spec:
       mco.in-cloud.io/pool: %s
   rollout:
     maxUnavailable: 1
-    debounceSeconds: 5
+    debounceSeconds: 1
   reboot:
     strategy: Never
 `, workersPool, workersPool)
@@ -184,7 +187,7 @@ spec:
       mco.in-cloud.io/pool: %s
   rollout:
     maxUnavailable: 1
-    debounceSeconds: 5
+    debounceSeconds: 1
   reboot:
     strategy: Never
 `, infraPool, infraPool)
@@ -197,13 +200,10 @@ spec:
 		})
 
 		It("should not have PoolOverlap condition set", func() {
-			By("waiting for pools to reconcile")
-			time.Sleep(10 * time.Second)
-
-			By("verifying no overlap on workers pool")
-			cond, err := getPoolCondition(ctx, workersPool, "PoolOverlap")
-			Expect(err).NotTo(HaveOccurred())
-			Expect(cond).To(Equal("False"))
+			By("waiting for PoolOverlap to be False (no overlap)")
+			Eventually(func() (string, error) {
+				return getPoolCondition(ctx, workersPool, "PoolOverlap")
+			}, 30*time.Second, 2*time.Second).Should(Equal("False"))
 		})
 	})
 })

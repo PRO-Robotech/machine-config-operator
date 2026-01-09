@@ -1,0 +1,9 @@
+# tests/e2e/kind-config.yaml
+# Multi-node Kind cluster configuration for E2E testing.
+# Required for testing rolling update scenarios with multiple nodes.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker

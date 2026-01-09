@@ -6,7 +6,7 @@ Tests that adding a MachineConfig with `reboot.required: false` does NOT trigger
 a reboot, even when there are other MachineConfigs with `reboot.required: true`
 in the pool.
 
-This is the key use case for diff-based reboot logic (STORY-066).
+This is the key use case for diff-based reboot logic.
 
 ## What We Test
 

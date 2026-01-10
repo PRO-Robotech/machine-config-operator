@@ -662,6 +662,199 @@ func TestEnsureRMC_HashCollision_ReusesMatchingSuffix(t *testing.T) {
 	}
 }
 
+// TestReconcile_EmptyMachineConfigList_NoRollout verifies that MCP without MachineConfigs
+// does not trigger cordon/drain rollout.
+func TestReconcile_EmptyMachineConfigList_NoRollout(t *testing.T) {
+	pool := &mcov1alpha1.MachineConfigPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+		Spec: mcov1alpha1.MachineConfigPoolSpec{
+			NodeSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"role": "worker"},
+			},
+			Rollout: mcov1alpha1.RolloutConfig{
+				DebounceSeconds: 0, // No debounce for test
+			},
+		},
+	}
+
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "worker-1",
+			Labels: map[string]string{"role": "worker"},
+		},
+	}
+
+	// No MachineConfigs - empty pool
+	r := newReconciler(pool, node)
+
+	// First reconcile
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKey{Name: "worker"},
+	})
+
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	// Should not requeue (no work to do)
+	if result.Requeue {
+		t.Error("Reconcile() should not requeue for empty pool")
+	}
+
+	// Second reconcile to ensure stability
+	result, err = r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKey{Name: "worker"},
+	})
+
+	if err != nil {
+		t.Fatalf("Second Reconcile() error = %v", err)
+	}
+
+	// Verify node is NOT cordoned
+	updatedNode := &corev1.Node{}
+	if err := r.Get(context.Background(), client.ObjectKey{Name: "worker-1"}, updatedNode); err != nil {
+		t.Fatalf("Failed to get node: %v", err)
+	}
+
+	if updatedNode.Spec.Unschedulable {
+		t.Error("node should NOT be cordoned for empty MachineConfig pool")
+	}
+
+	cordoned := updatedNode.Annotations[annotations.Cordoned]
+	if cordoned == "true" {
+		t.Error("node should NOT have cordoned annotation for empty pool")
+	}
+
+	// Verify no RMC was created
+	rmcList := &mcov1alpha1.RenderedMachineConfigList{}
+	if err := r.List(context.Background(), rmcList); err != nil {
+		t.Fatalf("Failed to list RMCs: %v", err)
+	}
+
+	if len(rmcList.Items) != 0 {
+		t.Errorf("RMC count = %d, want 0 for empty pool", len(rmcList.Items))
+	}
+
+	// Verify pool status is updated (AC-005)
+	updatedPool := &mcov1alpha1.MachineConfigPool{}
+	if err := r.Get(context.Background(), client.ObjectKey{Name: "worker"}, updatedPool); err != nil {
+		t.Fatalf("Failed to get pool: %v", err)
+	}
+
+	if updatedPool.Status.MachineCount != 1 {
+		t.Errorf("MachineCount = %d, want 1", updatedPool.Status.MachineCount)
+	}
+
+	if updatedPool.Status.ReadyMachineCount != 1 {
+		t.Errorf("ReadyMachineCount = %d, want 1", updatedPool.Status.ReadyMachineCount)
+	}
+
+	if updatedPool.Status.TargetRevision != "" {
+		t.Errorf("TargetRevision = %q, want empty for empty pool", updatedPool.Status.TargetRevision)
+	}
+}
+
+// TestReconcile_EmptyToNonEmpty_TriggersRollout verifies that adding MachineConfig
+// to previously empty pool triggers rollout correctly.
+func TestReconcile_EmptyToNonEmpty_TriggersRollout(t *testing.T) {
+	pool := &mcov1alpha1.MachineConfigPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+		Spec: mcov1alpha1.MachineConfigPoolSpec{
+			NodeSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"role": "worker"},
+			},
+			Rollout: mcov1alpha1.RolloutConfig{
+				DebounceSeconds: 0,
+			},
+		},
+	}
+
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "worker-1",
+			Labels: map[string]string{"role": "worker"},
+		},
+	}
+
+	// Start with empty pool
+	r := newReconciler(pool, node)
+
+	// First reconcile - empty pool
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKey{Name: "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	// Verify node is not cordoned (empty pool)
+	updatedNode := &corev1.Node{}
+	if err := r.Get(context.Background(), client.ObjectKey{Name: "worker-1"}, updatedNode); err != nil {
+		t.Fatalf("Failed to get node: %v", err)
+	}
+	if updatedNode.Spec.Unschedulable {
+		t.Error("node should NOT be cordoned for empty pool before adding MC")
+	}
+
+	// Now add a MachineConfig
+	mc := &mcov1alpha1.MachineConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "mc-1"},
+		Spec: mcov1alpha1.MachineConfigSpec{
+			Priority: 50,
+			Files: []mcov1alpha1.FileSpec{
+				{Path: "/etc/test.conf", Content: "test"},
+			},
+		},
+	}
+	if err := r.Create(context.Background(), mc); err != nil {
+		t.Fatalf("Failed to create MC: %v", err)
+	}
+
+	// Reconcile again - should now trigger rollout
+	_, err = r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKey{Name: "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile() after adding MC error = %v", err)
+	}
+
+	// Run a few more reconciles to process the rollout
+	for i := 0; i < 3; i++ {
+		r.Reconcile(context.Background(), ctrl.Request{
+			NamespacedName: client.ObjectKey{Name: "worker"},
+		})
+	}
+
+	// Verify RMC was created
+	rmcList := &mcov1alpha1.RenderedMachineConfigList{}
+	if err := r.List(context.Background(), rmcList); err != nil {
+		t.Fatalf("Failed to list RMCs: %v", err)
+	}
+
+	if len(rmcList.Items) != 1 {
+		t.Errorf("RMC count = %d, want 1 after adding MC", len(rmcList.Items))
+	}
+
+	// Verify node is now cordoned (rollout started)
+	if err := r.Get(context.Background(), client.ObjectKey{Name: "worker-1"}, updatedNode); err != nil {
+		t.Fatalf("Failed to get node: %v", err)
+	}
+
+	if !updatedNode.Spec.Unschedulable {
+		t.Error("node should be cordoned after adding MC to trigger rollout")
+	}
+
+	// Verify pool has TargetRevision set
+	updatedPool := &mcov1alpha1.MachineConfigPool{}
+	if err := r.Get(context.Background(), client.ObjectKey{Name: "worker"}, updatedPool); err != nil {
+		t.Fatalf("Failed to get pool: %v", err)
+	}
+
+	if updatedPool.Status.TargetRevision == "" {
+		t.Error("TargetRevision should be set after adding MC")
+	}
+}
+
 // TestEnsureRMC_NoCollision_ReusesExisting tests that matching hash reuses existing without suffix
 func TestEnsureRMC_NoCollision_ReusesExisting(t *testing.T) {
 	pool := &mcov1alpha1.MachineConfigPool{

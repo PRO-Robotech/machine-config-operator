@@ -153,6 +153,30 @@ func (r *MachineConfigPoolReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 
 	merged := renderer.Merge(configPtrs)
+
+	// Skip rollout if no MachineConfigs exist
+	// This prevents unnecessary cordon/drain when pool is created without configs
+	if len(configs) == 0 {
+		log.Info("no MachineConfigs for pool, skipping rollout",
+			"pool", pool.Name,
+			"nodeCount", len(nodes))
+
+		// Update status to reflect current state without triggering rollout
+		if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+			if err := r.Get(ctx, req.NamespacedName, pool); err != nil {
+				return err
+			}
+			pool.Status.MachineCount = len(nodes)
+			pool.Status.ReadyMachineCount = len(nodes)
+			pool.Status.UpdatedMachineCount = len(nodes)
+			pool.Status.TargetRevision = ""
+			return r.Status().Update(ctx, pool)
+		}); err != nil {
+			log.Error(err, "failed to update pool status for empty config")
+		}
+		return ctrl.Result{}, nil
+	}
+
 	hash := renderer.ComputeHash(merged)
 	debounceSeconds := pool.Spec.Rollout.DebounceSeconds
 	poolSpecHash := ComputePoolSpecHash(pool)

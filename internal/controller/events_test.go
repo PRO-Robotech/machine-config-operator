@@ -82,8 +82,8 @@ func TestEventRecorder_NodeCordonStarted(t *testing.T) {
 		if !strings.Contains(event, "node-1") {
 			t.Errorf("expected node name in event, got %s", event)
 		}
-		if !strings.Contains(event, "Normal") {
-			t.Errorf("expected Normal type, got %s", event)
+		if !strings.Contains(event, "Warning") {
+			t.Errorf("expected Warning type (destructive action), got %s", event)
 		}
 	default:
 		t.Error("expected event to be recorded")
@@ -172,6 +172,7 @@ func TestEventRecorder_NilRecorder(t *testing.T) {
 	er.PoolOverlapDetected(pool, []string{"node-1"})
 	er.NodeCordonStarted(pool, "node-1")
 	er.DrainStuck(pool, "node-1")
+	er.DrainFailed(pool, "node-1", "test reason")
 	er.RolloutBatchStarted(pool, 1, []string{"node-1"})
 	er.RolloutComplete(pool)
 }
@@ -233,6 +234,36 @@ func TestEventRecorder_RolloutComplete(t *testing.T) {
 	case event := <-recorder.Events:
 		if !strings.Contains(event, ReasonRolloutComplete) {
 			t.Errorf("expected reason %s, got %s", ReasonRolloutComplete, event)
+		}
+	default:
+		t.Error("expected event to be recorded")
+	}
+}
+
+// Test for DrainFailed event emission.
+func TestEventRecorder_DrainFailed(t *testing.T) {
+	recorder := record.NewFakeRecorder(10)
+	er := NewEventRecorder(recorder)
+
+	pool := &mcov1alpha1.MachineConfigPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+	}
+
+	er.DrainFailed(pool, "node-1", "PDB blocking eviction")
+
+	select {
+	case event := <-recorder.Events:
+		if !strings.Contains(event, ReasonDrainFailed) {
+			t.Errorf("expected reason %s, got %s", ReasonDrainFailed, event)
+		}
+		if !strings.Contains(event, "node-1") {
+			t.Errorf("expected node name in event, got %s", event)
+		}
+		if !strings.Contains(event, "PDB blocking eviction") {
+			t.Errorf("expected reason message in event, got %s", event)
+		}
+		if !strings.Contains(event, "Warning") {
+			t.Errorf("expected Warning type, got %s", event)
 		}
 	default:
 		t.Error("expected event to be recorded")

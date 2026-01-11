@@ -45,6 +45,7 @@ type NodeAnnotationWriter interface {
 	SetState(ctx context.Context, state string) error
 	SetRebootPending(ctx context.Context, pending bool) error
 	SetCurrentRevision(ctx context.Context, revision string) error
+	SetDone(ctx context.Context, revision string) error
 	ClearForceReboot(ctx context.Context) error
 }
 
@@ -233,12 +234,12 @@ func (h *Handler) CheckRebootPendingOnStartup(ctx context.Context, node *corev1.
 		if err := h.writer.SetRebootPending(ctx, false); err != nil {
 			return err
 		}
-		// Also update current-revision to desired-revision to indicate reboot completed
-		// This prevents the agent from re-evaluating the reboot policy for the same config
+		// Set state to done AND update current-revision atomically.
+		// This enables ShouldUncordon() to return true and uncordon the node.
 		desiredRevision := annotations.GetAnnotation(node.Annotations, annotations.DesiredRevision)
 		if desiredRevision != "" {
-			logger.Info("updating current-revision after reboot", "revision", desiredRevision)
-			if err := h.writer.SetCurrentRevision(ctx, desiredRevision); err != nil {
+			logger.Info("setting done state after reboot", "revision", desiredRevision)
+			if err := h.writer.SetDone(ctx, desiredRevision); err != nil {
 				return err
 			}
 		}

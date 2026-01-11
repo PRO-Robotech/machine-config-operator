@@ -176,17 +176,23 @@ type MachineConfigPoolStatus struct {
 
 // Condition types for MachineConfigPool.
 const (
-	// ConditionUpdated indicates all nodes have the target revision.
-	ConditionUpdated string = "Updated"
+	// ConditionReady indicates the pool is fully updated and healthy.
+	// Status=True: All nodes on target revision, no errors.
+	// Status=False: Rollout in progress, errors, or issues.
+	// Reasons: AllNodesUpdated, NoMachineConfigs, RolloutInProgress, DrainBlocked, Degraded, PoolOverlap
+	ConditionReady string = "Ready"
 
 	// ConditionUpdating indicates some nodes are still applying the target revision.
+	// Kept for monitoring/alerting convenience.
 	ConditionUpdating string = "Updating"
 
-	// ConditionDegraded indicates one or more nodes are in error state.
-	ConditionDegraded string = "Degraded"
+	// ConditionDraining indicates drain operation is in progress.
+	// Reasons: InProgress, PDBBlocked, EvictionFailed, Complete
+	ConditionDraining string = "Draining"
 
-	// ConditionRenderDegraded indicates the renderer failed to create a RenderedMachineConfig.
-	ConditionRenderDegraded string = "RenderDegraded"
+	// ConditionDegraded indicates one or more nodes are in error state.
+	// Reasons: NodeError, RenderFailed, ApplyTimeout
+	ConditionDegraded string = "Degraded"
 
 	// ConditionPoolOverlap indicates nodes in this pool also match other pools.
 	ConditionPoolOverlap string = "PoolOverlap"

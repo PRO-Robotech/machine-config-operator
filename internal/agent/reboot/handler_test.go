@@ -73,6 +73,15 @@ func (m *mockNodeWriter) SetCurrentRevision(ctx context.Context, revision string
 	return nil
 }
 
+func (m *mockNodeWriter) SetDone(ctx context.Context, revision string) error {
+	if m.setRevisionErr != nil {
+		return m.setRevisionErr
+	}
+	m.state = "done"
+	m.currentRevision = revision
+	return nil
+}
+
 // mockExecutor is a mock reboot executor.
 type mockExecutor struct {
 	called bool
@@ -501,6 +510,11 @@ func TestCheckRebootPendingOnStartup_ClearsPending(t *testing.T) {
 	// Should update current-revision to desired-revision
 	if writer.currentRevision != "worker-abc123" {
 		t.Errorf("current-revision = %q, want %q", writer.currentRevision, "worker-abc123")
+	}
+
+	// Should set state to "done" so ShouldUncordon() returns true.
+	if writer.state != "done" {
+		t.Errorf("state = %q, want %q (SetDone should be called)", writer.state, "done")
 	}
 
 	// Verify boot marker was created after check

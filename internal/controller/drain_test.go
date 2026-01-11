@@ -761,3 +761,223 @@ func TestIsDrainComplete_OnlyDaemonSetPods(t *testing.T) {
 		t.Error("expected drain to be complete when only DS pods remain")
 	}
 }
+
+// TestIsMCOPod_ByNamespace verifies that pods in MCO namespace are identified.
+func TestIsMCOPod_ByNamespace(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "some-pod",
+			Namespace: MCONamespace,
+		},
+	}
+	if !isMCOPod(pod) {
+		t.Error("pod in MCO namespace should be identified as MCO pod")
+	}
+}
+
+// TestIsMCOPod_ByLabels verifies label fallback when namespace differs.
+func TestIsMCOPod_ByLabels(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "controller-manager-xxx",
+			Namespace: "other-namespace",
+			Labels: map[string]string{
+				LabelAppName:      MCOAppName,
+				LabelControlPlane: MCOControllerManager,
+			},
+		},
+	}
+	if !isMCOPod(pod) {
+		t.Error("pod with MCO labels should be identified via fallback")
+	}
+}
+
+// TestIsMCOPod_OtherPod verifies regular pods are not identified as MCO pods.
+func TestIsMCOPod_OtherPod(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "app-pod",
+			Namespace: "default",
+			Labels: map[string]string{
+				"app": "my-app",
+			},
+		},
+	}
+	if isMCOPod(pod) {
+		t.Error("regular pod should not be identified as MCO pod")
+	}
+}
+
+// TestIsMCOPod_PartialLabels verifies that both labels are required for fallback.
+func TestIsMCOPod_PartialLabels(t *testing.T) {
+	tests := []struct {
+		name   string
+		labels map[string]string
+		want   bool
+	}{
+		{
+			name:   "only app.kubernetes.io/name",
+			labels: map[string]string{LabelAppName: MCOAppName},
+			want:   false,
+		},
+		{
+			name:   "only control-plane",
+			labels: map[string]string{LabelControlPlane: MCOControllerManager},
+			want:   false,
+		},
+		{
+			name:   "wrong app name",
+			labels: map[string]string{LabelAppName: "other-app", LabelControlPlane: MCOControllerManager},
+			want:   false,
+		},
+		{
+			name:   "wrong control-plane",
+			labels: map[string]string{LabelAppName: MCOAppName, LabelControlPlane: "other"},
+			want:   false,
+		},
+		{
+			name:   "both correct",
+			labels: map[string]string{LabelAppName: MCOAppName, LabelControlPlane: MCOControllerManager},
+			want:   true,
+		},
+		{
+			name:   "nil labels",
+			labels: nil,
+			want:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pod",
+					Namespace: "other-namespace", // Not MCO namespace
+					Labels:    tt.labels,
+				},
+			}
+			if got := isMCOPod(pod); got != tt.want {
+				t.Errorf("isMCOPod() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestFilterEvictablePods_ExcludesMCOByNamespace verifies MCO pods are excluded by namespace.
+func TestFilterEvictablePods_ExcludesMCOByNamespace(t *testing.T) {
+	pods := []corev1.Pod{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "controller-manager-abc",
+				Namespace: MCONamespace,
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "app-pod",
+				Namespace: "default",
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		},
+	}
+
+	result := FilterEvictablePods(pods, DrainConfig{DeleteOrphans: true})
+
+	if len(result) != 1 {
+		t.Errorf("expected 1 evictable pod, got %d", len(result))
+	}
+	if len(result) > 0 && result[0].Name != "app-pod" {
+		t.Errorf("expected app-pod to be evictable, got %s", result[0].Name)
+	}
+}
+
+// TestFilterEvictablePods_ExcludesMCOByLabel verifies MCO pods are excluded by label fallback.
+func TestFilterEvictablePods_ExcludesMCOByLabel(t *testing.T) {
+	pods := []corev1.Pod{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "controller-manager-xyz",
+				Namespace: "custom-mco-ns",
+				Labels: map[string]string{
+					LabelAppName:      MCOAppName,
+					LabelControlPlane: MCOControllerManager,
+				},
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "user-app",
+				Namespace: "custom-mco-ns",
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		},
+	}
+
+	result := FilterEvictablePods(pods, DrainConfig{DeleteOrphans: true})
+
+	if len(result) != 1 {
+		t.Errorf("expected 1 evictable pod, got %d", len(result))
+	}
+	if len(result) > 0 && result[0].Name != "user-app" {
+		t.Errorf("expected user-app to be evictable, got %s", result[0].Name)
+	}
+}
+
+// TestFilterEvictablePods_ExcludesMCOMixed verifies mixed MCO and regular pods.
+func TestFilterEvictablePods_ExcludesMCOMixed(t *testing.T) {
+	pods := []corev1.Pod{
+		// MCO controller in MCO namespace
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "controller-manager-abc",
+				Namespace: MCONamespace,
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		},
+		// MCO agent in MCO namespace (also excluded)
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "agent-xyz",
+				Namespace: MCONamespace,
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		},
+		// Regular app
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "app-1",
+				Namespace: "default",
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		},
+		// Another regular app
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "app-2",
+				Namespace: "kube-system",
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		},
+	}
+
+	result := FilterEvictablePods(pods, DrainConfig{DeleteOrphans: true})
+
+	if len(result) != 2 {
+		t.Errorf("expected 2 evictable pods, got %d", len(result))
+	}
+
+	// Verify the result contains only non-MCO pods
+	names := make(map[string]bool)
+	for _, p := range result {
+		names[p.Name] = true
+	}
+
+	if !names["app-1"] || !names["app-2"] {
+		t.Errorf("expected app-1 and app-2 to be evictable, got %v", names)
+	}
+	if names["controller-manager-abc"] || names["agent-xyz"] {
+		t.Error("MCO pods should not be in evictable list")
+	}
+}

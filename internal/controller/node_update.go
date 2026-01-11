@@ -22,10 +22,12 @@ type NodeUpdateResult struct {
 	DrainStuckMsg string
 
 	// Event flags for centralized event emission
-	Cordoned      bool // Node was just cordoned in this reconcile
-	DrainStarted  bool // Drain was just started in this reconcile
-	DrainComplete bool // Drain just completed in this reconcile
-	Uncordoned    bool // Node was just uncordoned in this reconcile
+	Cordoned       bool   // Node was just cordoned in this reconcile
+	DrainStarted   bool   // Drain was just started in this reconcile
+	DrainComplete  bool   // Drain just completed in this reconcile
+	Uncordoned     bool   // Node was just uncordoned in this reconcile
+	DrainFailed    bool   // Drain attempt failed (will retry)
+	DrainFailedMsg string // Reason for drain failure
 }
 
 // ProcessNodeUpdate handles the node update lifecycle: cordon -> drain -> set revision -> uncordon.
@@ -41,8 +43,45 @@ func ProcessNodeUpdate(
 	targetRevision string,
 	drainTimeoutSeconds int,
 	drainRetrySeconds int,
+	selfNodeName string,
+	events *EventRecorder,
 ) NodeUpdateResult {
 	logger := log.FromContext(ctx)
+
+	// Check if this is a brand new node joining an existing pool.
+	// We only skip cordon/drain when:
+	// 1. Pool already has LastSuccessfulRevision (not first config application)
+	// 2. Node has no current-revision (never had config applied)
+	// 3. Node has no pool annotation (MCO has never touched it)
+	// 4. Node is not cordoned (neither by MCO nor manually)
+	// For these truly new nodes, skip cordon/drain entirely and set desired-revision directly.
+	// This prevents new nodes from blocking other nodes during rollout.
+	currentRevision := annotations.GetAnnotation(node.Annotations, annotations.CurrentRevision)
+	poolAnnotation := annotations.GetAnnotation(node.Annotations, annotations.Pool)
+	isCordoned := annotations.GetAnnotation(node.Annotations, annotations.Cordoned) == "true"
+	isNewNode := currentRevision == "" && poolAnnotation == "" && !isCordoned && !node.Spec.Unschedulable
+	poolHasExistingConfig := pool.Status.LastSuccessfulRevision != ""
+	if isNewNode && poolHasExistingConfig {
+		logger.Info("new node joined existing pool, skipping cordon/drain",
+			"node", node.Name,
+			"targetRevision", targetRevision,
+			"poolLastSuccessfulRevision", pool.Status.LastSuccessfulRevision)
+
+		// Set desired-revision directly, agent will apply config
+		if err := SetNodeAnnotation(ctx, c, node, annotations.DesiredRevision, targetRevision); err != nil {
+			logger.Error(err, "failed to set desired revision on new node", "node", node.Name)
+			return NodeUpdateResult{Result: ctrl.Result{RequeueAfter: 5 * time.Second}}
+		}
+		// Record when we set the desired revision for apply timeout detection
+		if err := SetNodeAnnotation(ctx, c, node, annotations.DesiredRevisionSetAt, time.Now().UTC().Format(time.RFC3339)); err != nil {
+			logger.Error(err, "failed to set desired-revision-set-at on new node", "node", node.Name)
+		}
+		if err := SetNodeAnnotation(ctx, c, node, annotations.Pool, pool.Name); err != nil {
+			logger.Error(err, "failed to set pool annotation on new node", "node", node.Name)
+		}
+		// Return immediately - agent will apply and set current-revision + state=done
+		return NodeUpdateResult{Result: ctrl.Result{RequeueAfter: 10 * time.Second}}
+	}
 
 	// Check if drain was already started (for DrainStarted event)
 	drainWasStarted := annotations.GetAnnotation(node.Annotations, annotations.DrainStartedAt) != ""
@@ -77,8 +116,10 @@ func ProcessNodeUpdate(
 			retry := HandleDrainRetry(ctx, c, node, drainTimeoutSeconds, drainRetrySeconds)
 
 			result := NodeUpdateResult{
-				Result:     ctrl.Result{RequeueAfter: retry.RequeueAfter},
-				DrainStuck: retry.SetDrainStuck,
+				Result:         ctrl.Result{RequeueAfter: retry.RequeueAfter},
+				DrainStuck:     retry.SetDrainStuck,
+				DrainFailed:    true,
+				DrainFailedMsg: err.Error(),
 			}
 			if retry.SetDrainStuck {
 				result.DrainStuckMsg = fmt.Sprintf("Node %s drain timeout: %v", node.Name, err)
@@ -155,6 +196,9 @@ func SetDrainStuckCondition(pool *mcov1alpha1.MachineConfigPool, message string)
 
 	for i, c := range pool.Status.Conditions {
 		if c.Type == mcov1alpha1.ConditionDrainStuck {
+			if c.Status == metav1.ConditionTrue {
+				condition.LastTransitionTime = c.LastTransitionTime
+			}
 			pool.Status.Conditions[i] = condition
 			setDegradedForDrainStuck(pool)
 			return
@@ -206,11 +250,59 @@ func ClearDrainStuckCondition(pool *mcov1alpha1.MachineConfigPool) {
 
 	for i, c := range pool.Status.Conditions {
 		if c.Type == mcov1alpha1.ConditionDrainStuck {
+			if c.Status == metav1.ConditionFalse {
+				condition.LastTransitionTime = c.LastTransitionTime
+			}
 			pool.Status.Conditions[i] = condition
 			return
 		}
 	}
 
 	// Ensure the condition exists
+	pool.Status.Conditions = append(pool.Status.Conditions, condition)
+}
+
+// SetDrainingCondition sets Draining=True with the given reason and message.
+// This condition shows drain status before DrainStuck timeout is reached.
+func SetDrainingCondition(pool *mcov1alpha1.MachineConfigPool, reason, message string) {
+	condition := metav1.Condition{
+		Type:               mcov1alpha1.ConditionDraining,
+		Status:             metav1.ConditionTrue,
+		Reason:             reason,
+		Message:            message,
+		LastTransitionTime: metav1.Now(),
+	}
+
+	for i, c := range pool.Status.Conditions {
+		if c.Type == mcov1alpha1.ConditionDraining {
+			if c.Status == metav1.ConditionTrue {
+				condition.LastTransitionTime = c.LastTransitionTime
+			}
+			pool.Status.Conditions[i] = condition
+			return
+		}
+	}
+	pool.Status.Conditions = append(pool.Status.Conditions, condition)
+}
+
+// ClearDrainingCondition sets Draining=False.
+func ClearDrainingCondition(pool *mcov1alpha1.MachineConfigPool) {
+	condition := metav1.Condition{
+		Type:               mcov1alpha1.ConditionDraining,
+		Status:             metav1.ConditionFalse,
+		Reason:             "Complete",
+		Message:            "",
+		LastTransitionTime: metav1.Now(),
+	}
+
+	for i, c := range pool.Status.Conditions {
+		if c.Type == mcov1alpha1.ConditionDraining {
+			if c.Status == metav1.ConditionFalse {
+				condition.LastTransitionTime = c.LastTransitionTime
+			}
+			pool.Status.Conditions[i] = condition
+			return
+		}
+	}
 	pool.Status.Conditions = append(pool.Status.Conditions, condition)
 }

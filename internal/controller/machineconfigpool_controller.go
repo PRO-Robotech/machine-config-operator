@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -48,17 +49,22 @@ type MachineConfigPoolReconciler struct {
 	annotator *NodeAnnotator
 	cleaner   *RMCCleaner
 	events    *EventRecorder
+
+	// selfNodeName is the node where this controller runs.
+	// Used to skip self-node drain and prevent controller disruption.
+	selfNodeName string
 }
 
 // NewMachineConfigPoolReconciler creates a new reconciler with all components.
 func NewMachineConfigPoolReconciler(c client.Client, scheme *runtime.Scheme) *MachineConfigPoolReconciler {
 	return &MachineConfigPoolReconciler{
-		Client:    c,
-		Scheme:    scheme,
-		debounce:  NewDebounceState(),
-		annotator: NewNodeAnnotator(c),
-		cleaner:   NewRMCCleaner(c),
-		events:    &EventRecorder{}, // nil-safe: methods check for nil recorder
+		Client:       c,
+		Scheme:       scheme,
+		debounce:     NewDebounceState(),
+		annotator:    NewNodeAnnotator(c),
+		cleaner:      NewRMCCleaner(c),
+		events:       &EventRecorder{}, // nil-safe: methods check for nil recorder
+		selfNodeName: os.Getenv("NODE_NAME"),
 	}
 }
 
@@ -87,6 +93,14 @@ func (r *MachineConfigPoolReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, err
 	}
 
+	// Migration cleanup: remove deprecated conditions from earlier versions.
+	if CleanupLegacyConditions(pool) {
+		log.Info("cleaned up legacy conditions", "pool", pool.Name)
+		if err := r.Status().Update(ctx, pool); err != nil {
+			log.Error(err, "failed to update pool after legacy cleanup")
+		}
+	}
+
 	if pool.Spec.Paused {
 		log.Info("pool is paused, skipping reconciliation")
 		return ctrl.Result{}, nil
@@ -96,7 +110,6 @@ func (r *MachineConfigPoolReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	overlap, err := DetectPoolOverlap(ctx, r.Client)
 	if err != nil {
 		log.Error(err, "failed to detect pool overlap")
-		// Continue without overlap detection on error - don't block all reconciliation
 	}
 
 	// Check if overlap was previously true (for PoolOverlapResolved event)
@@ -162,6 +175,7 @@ func (r *MachineConfigPoolReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			"nodeCount", len(nodes))
 
 		// Update status to reflect current state without triggering rollout
+		// But still update overlap condition so PoolOverlap works for empty pools
 		if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 			if err := r.Get(ctx, req.NamespacedName, pool); err != nil {
 				return err
@@ -170,6 +184,8 @@ func (r *MachineConfigPoolReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			pool.Status.ReadyMachineCount = len(nodes)
 			pool.Status.UpdatedMachineCount = len(nodes)
 			pool.Status.TargetRevision = ""
+			// Apply overlap condition even for empty pools
+			ApplyOverlapCondition(pool, overlap)
 			return r.Status().Update(ctx, pool)
 		}); err != nil {
 			log.Error(err, "failed to update pool status for empty config")
@@ -261,7 +277,28 @@ func (r *MachineConfigPoolReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 	for i := range nodesToProcess {
 		node := &nodesToProcess[i]
-		result := ProcessNodeUpdate(ctx, r.Client, pool, node, rmc.Name, drainTimeoutSeconds, drainRetrySeconds)
+
+		// Skip cordon/drain for the controller's own node to prevent self-disruption.
+		// Set desired-revision directly and let agent apply config without drain.
+		if r.isSelfNode(node) {
+			log.Info("skipping drain for self node",
+				"node", node.Name,
+				"reason", "controller runs on this node")
+
+			// Record metric
+			RecordDrainSelfSkipped(pool.Name)
+
+			// Record event
+			r.events.SelfNodeDrainSkipped(pool, node.Name)
+
+			// Set desired-revision directly (skip cordon/drain)
+			if err := r.annotator.SetDesiredRevision(ctx, node.Name, rmc.Name, pool.Name); err != nil {
+				log.Error(err, "failed to set desired revision for self node", "node", node.Name)
+			}
+			continue
+		}
+
+		result := ProcessNodeUpdate(ctx, r.Client, pool, node, rmc.Name, drainTimeoutSeconds, drainRetrySeconds, r.selfNodeName, r.events)
 
 		// Emit lifecycle events based on result flags
 		if result.Cordoned {
@@ -269,6 +306,9 @@ func (r *MachineConfigPoolReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		}
 		if result.DrainStarted {
 			r.events.NodeDrainStarted(pool, node.Name)
+		}
+		if result.DrainFailed && result.DrainFailedMsg != "" {
+			r.events.DrainFailed(pool, node.Name, result.DrainFailedMsg)
 		}
 		if result.DrainComplete {
 			r.events.DrainComplete(pool, node.Name)
@@ -291,7 +331,15 @@ func (r *MachineConfigPoolReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		}
 	}
 
-	// 6. Update status - use ALL nodes for accurate counts, but apply overlap and drain stuck conditions
+	// 6. Update status - use ALL nodes for accurate counts, but apply overlap and drain stuck conditions.
+	// Re-fetch nodes to get latest annotations for accurate status calculation.
+	// This is necessary because annotations may have been updated during reconcile
+	// (by controller cordon/drain actions or by agent applying config).
+	nodes, err = SelectNodes(ctx, r.Client, pool)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to re-fetch nodes for status: %w", err)
+	}
+
 	// Track if rollout just completed for event emission
 	wasNotComplete := pool.Status.UpdatedMachineCount != pool.Status.MachineCount ||
 		pool.Status.ReadyMachineCount != pool.Status.MachineCount
@@ -536,6 +584,12 @@ func (r *MachineConfigPoolReconciler) mapNodeToPool(ctx context.Context, obj cli
 	}
 
 	return requests
+}
+
+// isSelfNode checks if the given node is where the controller is running.
+// Used to skip drain for the controller's own node and prevent self-disruption.
+func (r *MachineConfigPoolReconciler) isSelfNode(node *corev1.Node) bool {
+	return r.selfNodeName != "" && node.Name == r.selfNodeName
 }
 
 // hasPoolOverlapCondition checks if the pool has a PoolOverlap condition set to True.

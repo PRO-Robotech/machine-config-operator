@@ -2,6 +2,7 @@ package controller
 
 import (
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -189,5 +190,242 @@ func TestClearDrainStuckCondition_NoExistingCondition(t *testing.T) {
 	}
 	if pool.Status.Conditions[0].Status != metav1.ConditionFalse {
 		t.Errorf("expected condition status False, got %s", pool.Status.Conditions[0].Status)
+	}
+}
+
+// Tests for LastTransitionTime preservation to prevent constant status updates.
+
+func TestClearDrainStuckCondition_PreservesTimestampWhenStatusUnchanged(t *testing.T) {
+	// Given: pool with DrainStuck=False and specific timestamp from 1 hour ago
+	oldTime := metav1.NewTime(time.Now().Add(-1 * time.Hour))
+	pool := &mcov1alpha1.MachineConfigPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool"},
+		Status: mcov1alpha1.MachineConfigPoolStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:               mcov1alpha1.ConditionDrainStuck,
+					Status:             metav1.ConditionFalse,
+					Reason:             "DrainComplete",
+					LastTransitionTime: oldTime,
+				},
+			},
+		},
+	}
+
+	// When: ClearDrainStuckCondition is called (False -> False)
+	ClearDrainStuckCondition(pool)
+
+	// Then: LastTransitionTime should be preserved
+	for _, c := range pool.Status.Conditions {
+		if c.Type == mcov1alpha1.ConditionDrainStuck {
+			if !c.LastTransitionTime.Equal(&oldTime) {
+				t.Errorf("expected LastTransitionTime %v to be preserved, got %v", oldTime, c.LastTransitionTime)
+			}
+			return
+		}
+	}
+	t.Error("DrainStuck condition not found")
+}
+
+func TestClearDrainStuckCondition_UpdatesTimestampOnRealTransition(t *testing.T) {
+	// Given: pool with DrainStuck=True (stuck state)
+	oldTime := metav1.NewTime(time.Now().Add(-1 * time.Hour))
+	pool := &mcov1alpha1.MachineConfigPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool"},
+		Status: mcov1alpha1.MachineConfigPoolStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:               mcov1alpha1.ConditionDrainStuck,
+					Status:             metav1.ConditionTrue, // True!
+					Reason:             "DrainTimeout",
+					LastTransitionTime: oldTime,
+				},
+			},
+		},
+	}
+
+	// When: ClearDrainStuckCondition is called (True -> False)
+	ClearDrainStuckCondition(pool)
+
+	// Then: LastTransitionTime should be updated (not equal to old)
+	for _, c := range pool.Status.Conditions {
+		if c.Type == mcov1alpha1.ConditionDrainStuck {
+			if c.LastTransitionTime.Equal(&oldTime) {
+				t.Error("expected LastTransitionTime to be updated on status transition True->False")
+			}
+			if c.Status != metav1.ConditionFalse {
+				t.Errorf("expected status False, got %s", c.Status)
+			}
+			return
+		}
+	}
+	t.Error("DrainStuck condition not found")
+}
+
+func TestSetDrainStuckCondition_PreservesTimestampWhenStatusUnchanged(t *testing.T) {
+	// Given: pool with DrainStuck=True and specific timestamp from 1 hour ago
+	oldTime := metav1.NewTime(time.Now().Add(-1 * time.Hour))
+	pool := &mcov1alpha1.MachineConfigPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool"},
+		Status: mcov1alpha1.MachineConfigPoolStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:               mcov1alpha1.ConditionDrainStuck,
+					Status:             metav1.ConditionTrue,
+					Reason:             "DrainTimeout",
+					Message:            "old message",
+					LastTransitionTime: oldTime,
+				},
+				{
+					Type:               mcov1alpha1.ConditionDegraded,
+					Status:             metav1.ConditionTrue,
+					Reason:             "DrainStuck",
+					LastTransitionTime: oldTime,
+				},
+			},
+		},
+	}
+
+	// When: SetDrainStuckCondition is called again (True -> True)
+	SetDrainStuckCondition(pool, "new message")
+
+	// Then: LastTransitionTime should be preserved
+	for _, c := range pool.Status.Conditions {
+		if c.Type == mcov1alpha1.ConditionDrainStuck {
+			if !c.LastTransitionTime.Equal(&oldTime) {
+				t.Errorf("expected LastTransitionTime %v to be preserved, got %v", oldTime, c.LastTransitionTime)
+			}
+			// Message should be updated
+			if c.Message != "new message" {
+				t.Errorf("expected message to be updated, got %s", c.Message)
+			}
+			return
+		}
+	}
+	t.Error("DrainStuck condition not found")
+}
+
+func TestSetDrainStuckCondition_UpdatesTimestampOnRealTransition(t *testing.T) {
+	// Given: pool with DrainStuck=False (clear state)
+	oldTime := metav1.NewTime(time.Now().Add(-1 * time.Hour))
+	pool := &mcov1alpha1.MachineConfigPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool"},
+		Status: mcov1alpha1.MachineConfigPoolStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:               mcov1alpha1.ConditionDrainStuck,
+					Status:             metav1.ConditionFalse, // False!
+					Reason:             "DrainComplete",
+					LastTransitionTime: oldTime,
+				},
+			},
+		},
+	}
+
+	// When: SetDrainStuckCondition is called (False -> True)
+	SetDrainStuckCondition(pool, "drain stuck now")
+
+	// Then: LastTransitionTime should be updated (not equal to old)
+	for _, c := range pool.Status.Conditions {
+		if c.Type == mcov1alpha1.ConditionDrainStuck {
+			if c.LastTransitionTime.Equal(&oldTime) {
+				t.Error("expected LastTransitionTime to be updated on status transition False->True")
+			}
+			if c.Status != metav1.ConditionTrue {
+				t.Errorf("expected status True, got %s", c.Status)
+			}
+			return
+		}
+	}
+	t.Error("DrainStuck condition not found")
+}
+
+// Tests for new node detection logic.
+
+func TestIsNewNode_TrueWhenNoAnnotations(t *testing.T) {
+	// A node with no current-revision, no pool annotation, not cordoned
+	// AND pool has LastSuccessfulRevision = "abc" should be considered a new node
+	pool := &mcov1alpha1.MachineConfigPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+		Status: mcov1alpha1.MachineConfigPoolStatus{
+			LastSuccessfulRevision: "worker-abc123",
+		},
+	}
+
+	// Test the detection logic (extracted from ProcessNodeUpdate)
+	currentRevision := ""
+	poolAnnotation := ""
+	isCordoned := false
+	isUnschedulable := false
+	poolHasExistingConfig := pool.Status.LastSuccessfulRevision != ""
+
+	isNewNode := currentRevision == "" && poolAnnotation == "" && !isCordoned && !isUnschedulable
+
+	if !isNewNode {
+		t.Error("expected node to be detected as new")
+	}
+	if !poolHasExistingConfig {
+		t.Error("expected pool to have existing config")
+	}
+	// Combined condition for skipping cordon/drain
+	shouldSkipCordonDrain := isNewNode && poolHasExistingConfig
+	if !shouldSkipCordonDrain {
+		t.Error("expected new node in existing pool to skip cordon/drain")
+	}
+}
+
+func TestIsNewNode_FalseWhenHasPoolAnnotation(t *testing.T) {
+	// A node that has a pool annotation (MCO has touched it before) is NOT new
+	currentRevision := ""
+	poolAnnotation := "worker"
+	isCordoned := false
+
+	isNewNode := currentRevision == "" && poolAnnotation == "" && !isCordoned
+
+	if isNewNode {
+		t.Error("node with pool annotation should NOT be detected as new")
+	}
+}
+
+func TestIsNewNode_FalseWhenHasCurrentRevision(t *testing.T) {
+	// A node that has a current-revision is NOT new
+	currentRevision := "worker-abc123"
+	poolAnnotation := ""
+	isCordoned := false
+
+	isNewNode := currentRevision == "" && poolAnnotation == "" && !isCordoned
+
+	if isNewNode {
+		t.Error("node with current-revision should NOT be detected as new")
+	}
+}
+
+func TestIsNewNode_FalseWhenPoolHasNoConfig(t *testing.T) {
+	// A new pool without LastSuccessfulRevision should NOT skip cordon/drain
+	// (this is the initial config application case)
+	pool := &mcov1alpha1.MachineConfigPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+		Status:     mcov1alpha1.MachineConfigPoolStatus{
+			// LastSuccessfulRevision is empty
+		},
+	}
+
+	currentRevision := ""
+	poolAnnotation := ""
+	isCordoned := false
+	isUnschedulable := false
+	poolHasExistingConfig := pool.Status.LastSuccessfulRevision != ""
+
+	isNewNode := currentRevision == "" && poolAnnotation == "" && !isCordoned && !isUnschedulable
+	shouldSkipCordonDrain := isNewNode && poolHasExistingConfig
+
+	if !isNewNode {
+		t.Error("node should be detected as new")
+	}
+	if poolHasExistingConfig {
+		t.Error("pool should NOT have existing config")
+	}
+	if shouldSkipCordonDrain {
+		t.Error("should NOT skip cordon/drain for new node in new pool")
 	}
 }

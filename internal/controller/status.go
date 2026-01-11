@@ -80,15 +80,17 @@ func AggregateStatus(target string, nodes []corev1.Node, applyTimeoutSeconds int
 			revisionCounts[current]++
 		}
 
-		if current == target {
+		isUpdated := current == target
+		if isUpdated {
 			status.UpdatedMachineCount++
-			if state == annotations.StateDone || state == annotations.StateIdle {
-				status.ReadyMachineCount++
-			}
 		}
 
-		// Check for apply timeout
-		if state == annotations.StateApplying {
+		switch state {
+		case annotations.StateDone, annotations.StateIdle:
+			if isUpdated {
+				status.ReadyMachineCount++
+			}
+		case annotations.StateApplying:
 			if isApplyTimedOut(nodeAnnotations, timeoutDuration) {
 				// Timed out nodes count as degraded, not updating
 				status.DegradedMachineCount++
@@ -96,11 +98,11 @@ func AggregateStatus(target string, nodes []corev1.Node, applyTimeoutSeconds int
 			} else {
 				status.UpdatingMachineCount++
 			}
-		} else if state == annotations.StateError {
+			status.UnavailableMachineCount++
+		case annotations.StateError:
 			status.DegradedMachineCount++
-		}
-
-		if state != annotations.StateDone && state != annotations.StateIdle {
+			status.UnavailableMachineCount++
+		default:
 			status.UnavailableMachineCount++
 		}
 
@@ -174,22 +176,39 @@ func computeCurrentRevision(counts map[string]int, target string) string {
 
 func computeConditions(status *AggregatedStatus) []metav1.Condition {
 	now := metav1.Now()
-	conditions := make([]metav1.Condition, 0, 3)
+	conditions := make([]metav1.Condition, 0, 4) // Ready, Updating, Degraded, Draining
 
-	if status.MachineCount > 0 && status.UpdatedMachineCount == status.MachineCount {
+	// Ready condition: True when all nodes updated and no errors
+	if status.MachineCount > 0 && status.UpdatedMachineCount == status.MachineCount && status.DegradedMachineCount == 0 {
 		conditions = append(conditions, metav1.Condition{
-			Type:               mcov1alpha1.ConditionUpdated,
+			Type:               mcov1alpha1.ConditionReady,
 			Status:             metav1.ConditionTrue,
 			Reason:             "AllNodesUpdated",
 			Message:            fmt.Sprintf("All %d nodes are at target revision", status.MachineCount),
 			LastTransitionTime: now,
 		})
+	} else if status.DegradedMachineCount > 0 {
+		conditions = append(conditions, metav1.Condition{
+			Type:               mcov1alpha1.ConditionReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             "Degraded",
+			Message:            fmt.Sprintf("%d nodes in error state", status.DegradedMachineCount),
+			LastTransitionTime: now,
+		})
+	} else if status.UpdatingMachineCount > 0 || status.DrainingMachineCount > 0 {
+		conditions = append(conditions, metav1.Condition{
+			Type:               mcov1alpha1.ConditionReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             "RolloutInProgress",
+			Message:            fmt.Sprintf("%d of %d nodes updated", status.UpdatedMachineCount, status.MachineCount),
+			LastTransitionTime: now,
+		})
 	} else {
 		conditions = append(conditions, metav1.Condition{
-			Type:               mcov1alpha1.ConditionUpdated,
+			Type:               mcov1alpha1.ConditionReady,
 			Status:             metav1.ConditionFalse,
-			Reason:             "NodesUpdating",
-			Message:            fmt.Sprintf("%d of %d nodes updated", status.UpdatedMachineCount, status.MachineCount),
+			Reason:             "NoMachineConfigs",
+			Message:            "No MachineConfigs in pool or no nodes",
 			LastTransitionTime: now,
 		})
 	}
@@ -228,6 +247,25 @@ func computeConditions(status *AggregatedStatus) []metav1.Condition {
 			Status:             metav1.ConditionFalse,
 			Reason:             "NoErrors",
 			Message:            "No nodes in error state",
+			LastTransitionTime: now,
+		})
+	}
+
+	// Draining condition - True when nodes are being drained.
+	if status.DrainingMachineCount > 0 {
+		conditions = append(conditions, metav1.Condition{
+			Type:               mcov1alpha1.ConditionDraining,
+			Status:             metav1.ConditionTrue,
+			Reason:             "DrainInProgress",
+			Message:            fmt.Sprintf("%d nodes draining", status.DrainingMachineCount),
+			LastTransitionTime: now,
+		})
+	} else {
+		conditions = append(conditions, metav1.Condition{
+			Type:               mcov1alpha1.ConditionDraining,
+			Status:             metav1.ConditionFalse,
+			Reason:             "NoDrainsActive",
+			Message:            "No nodes draining",
 			LastTransitionTime: now,
 		})
 	}
@@ -365,40 +403,37 @@ func ApplyOverlapCondition(pool *mcov1alpha1.MachineConfigPool, overlap *Overlap
 	}
 }
 
-// SetRenderDegradedCondition sets RenderDegraded=True and Degraded=True when RMC creation fails.
+// SetRenderDegradedCondition sets Degraded=True with Reason=RenderFailed when RMC creation fails.
+// Note: Sets Degraded condition with RenderFailed reason (RenderDegraded was deprecated).
 func SetRenderDegradedCondition(pool *mcov1alpha1.MachineConfigPool, message string) {
 	now := metav1.Now()
 
-	// Set RenderDegraded=True
+	// Set Degraded=True with RenderFailed reason
 	setCondition(pool, metav1.Condition{
-		Type:               mcov1alpha1.ConditionRenderDegraded,
+		Type:               mcov1alpha1.ConditionDegraded,
 		Status:             metav1.ConditionTrue,
 		Reason:             "RenderFailed",
 		Message:            message,
 		LastTransitionTime: now,
 	})
-
-	// Also set Degraded=True
-	setCondition(pool, metav1.Condition{
-		Type:               mcov1alpha1.ConditionDegraded,
-		Status:             metav1.ConditionTrue,
-		Reason:             "RenderDegraded",
-		Message:            "RMC creation failed: " + message,
-		LastTransitionTime: now,
-	})
 }
 
-// ClearRenderDegradedCondition sets RenderDegraded=False after successful RMC creation.
+// ClearRenderDegradedCondition clears the render degraded state.
+// Note: This only clears Degraded if it was set with RenderFailed reason.
 func ClearRenderDegradedCondition(pool *mcov1alpha1.MachineConfigPool) {
-	now := metav1.Now()
-
-	setCondition(pool, metav1.Condition{
-		Type:               mcov1alpha1.ConditionRenderDegraded,
-		Status:             metav1.ConditionFalse,
-		Reason:             "RenderSuccess",
-		Message:            "RMC created successfully",
-		LastTransitionTime: now,
-	})
+	// Only clear Degraded if reason is RenderFailed
+	for i, c := range pool.Status.Conditions {
+		if c.Type == mcov1alpha1.ConditionDegraded && c.Reason == "RenderFailed" {
+			pool.Status.Conditions[i] = metav1.Condition{
+				Type:               mcov1alpha1.ConditionDegraded,
+				Status:             metav1.ConditionFalse,
+				Reason:             "RenderSuccess",
+				Message:            "RMC created successfully",
+				LastTransitionTime: metav1.Now(),
+			}
+			return
+		}
+	}
 }
 
 // setCondition updates or adds a condition in the pool's status.
@@ -444,4 +479,34 @@ func setDegradedForOverlap(pool *mcov1alpha1.MachineConfigPool) {
 		Message:            "Pool has nodes that match other pools",
 		LastTransitionTime: now,
 	})
+}
+
+// CleanupLegacyConditions removes deprecated conditions from earlier versions.
+// This ensures backward compatibility during upgrades.
+// Returns true if any conditions were removed.
+func CleanupLegacyConditions(pool *mcov1alpha1.MachineConfigPool) bool {
+	if pool == nil || len(pool.Status.Conditions) == 0 {
+		return false
+	}
+
+	cleaned := false
+	newConditions := make([]metav1.Condition, 0, len(pool.Status.Conditions))
+
+	for _, c := range pool.Status.Conditions {
+		// Skip deprecated conditions from earlier versions.
+		switch c.Type {
+		case "Updated": // Replaced by ConditionReady
+			cleaned = true
+			continue
+		case "RenderDegraded": // Merged into ConditionDegraded with Reason=RenderFailed
+			cleaned = true
+			continue
+		}
+		newConditions = append(newConditions, c)
+	}
+
+	if cleaned {
+		pool.Status.Conditions = newConditions
+	}
+	return cleaned
 }

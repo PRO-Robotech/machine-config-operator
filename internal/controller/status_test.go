@@ -79,7 +79,7 @@ func TestAggregateStatus_AllUpdated(t *testing.T) {
 
 	foundUpdated := false
 	for _, c := range status.Conditions {
-		if c.Type == mcov1alpha1.ConditionUpdated && c.Status == metav1.ConditionTrue {
+		if c.Type == mcov1alpha1.ConditionReady && c.Status == metav1.ConditionTrue {
 			foundUpdated = true
 			break
 		}
@@ -175,7 +175,7 @@ func TestAggregateStatus_Empty(t *testing.T) {
 	// Updated should be False for empty pool
 	foundUpdated := false
 	for _, c := range status.Conditions {
-		if c.Type == mcov1alpha1.ConditionUpdated && c.Status == metav1.ConditionFalse {
+		if c.Type == mcov1alpha1.ConditionReady && c.Status == metav1.ConditionFalse {
 			foundUpdated = true
 			break
 		}
@@ -280,24 +280,25 @@ func TestComputeConditions_AllTrue(t *testing.T) {
 
 	conditions := computeConditions(status)
 
-	if len(conditions) != 3 {
-		t.Errorf("len(conditions) = %d, want 3", len(conditions))
+	// Expect 4 conditions: Ready, Updating, Degraded, Draining
+	if len(conditions) != 4 {
+		t.Errorf("len(conditions) = %d, want 4", len(conditions))
 	}
 
-	// Find Updated condition
-	var updatedCond *metav1.Condition
+	// Find Ready condition
+	var readyCond *metav1.Condition
 	for i := range conditions {
-		if conditions[i].Type == mcov1alpha1.ConditionUpdated {
-			updatedCond = &conditions[i]
+		if conditions[i].Type == mcov1alpha1.ConditionReady {
+			readyCond = &conditions[i]
 			break
 		}
 	}
 
-	if updatedCond == nil {
-		t.Fatal("Updated condition not found")
+	if readyCond == nil {
+		t.Fatal("Ready condition not found")
 	}
-	if updatedCond.Status != metav1.ConditionTrue {
-		t.Errorf("Updated status = %s, want True", updatedCond.Status)
+	if readyCond.Status != metav1.ConditionTrue {
+		t.Errorf("Ready status = %s, want True", readyCond.Status)
 	}
 }
 
@@ -357,7 +358,7 @@ func TestApplyStatusToPool(t *testing.T) {
 		UnavailableMachineCount: 2,
 		PendingRebootCount:      0,
 		Conditions: []metav1.Condition{
-			{Type: mcov1alpha1.ConditionUpdated, Status: metav1.ConditionFalse},
+			{Type: mcov1alpha1.ConditionReady, Status: metav1.ConditionFalse},
 		},
 	}
 
@@ -380,12 +381,12 @@ func TestMergeConditions_PreservesTransitionTime(t *testing.T) {
 	newTime := metav1.Now()
 
 	existing := []metav1.Condition{
-		{Type: mcov1alpha1.ConditionUpdated, Status: metav1.ConditionTrue, LastTransitionTime: oldTime},
+		{Type: mcov1alpha1.ConditionReady, Status: metav1.ConditionTrue, LastTransitionTime: oldTime},
 		{Type: mcov1alpha1.ConditionDegraded, Status: metav1.ConditionFalse, LastTransitionTime: oldTime},
 	}
 
 	new := []metav1.Condition{
-		{Type: mcov1alpha1.ConditionUpdated, Status: metav1.ConditionTrue, LastTransitionTime: newTime},  // same status
+		{Type: mcov1alpha1.ConditionReady, Status: metav1.ConditionTrue, LastTransitionTime: newTime},    // same status
 		{Type: mcov1alpha1.ConditionDegraded, Status: metav1.ConditionTrue, LastTransitionTime: newTime}, // changed status
 	}
 
@@ -412,7 +413,7 @@ func TestMergeConditions_NewCondition(t *testing.T) {
 
 	existing := []metav1.Condition{}
 	new := []metav1.Condition{
-		{Type: mcov1alpha1.ConditionUpdated, Status: metav1.ConditionTrue, LastTransitionTime: newTime},
+		{Type: mcov1alpha1.ConditionReady, Status: metav1.ConditionTrue, LastTransitionTime: newTime},
 	}
 
 	result := mergeConditions(existing, new)
@@ -583,7 +584,7 @@ func TestApplyOverlapCondition_PreservesExistingConditions(t *testing.T) {
 		Status: mcov1alpha1.MachineConfigPoolStatus{
 			Conditions: []metav1.Condition{
 				{
-					Type:   mcov1alpha1.ConditionUpdated,
+					Type:   mcov1alpha1.ConditionReady,
 					Status: metav1.ConditionTrue,
 					Reason: "AllNodesUpdated",
 				},
@@ -597,7 +598,7 @@ func TestApplyOverlapCondition_PreservesExistingConditions(t *testing.T) {
 	// Original Updated condition should still be there
 	var foundUpdated bool
 	for _, c := range pool.Status.Conditions {
-		if c.Type == mcov1alpha1.ConditionUpdated {
+		if c.Type == mcov1alpha1.ConditionReady {
 			foundUpdated = true
 		}
 	}
@@ -964,7 +965,7 @@ func TestSetRenderDegradedCondition(t *testing.T) {
 	// Check RenderDegraded condition
 	var foundRenderDegraded bool
 	for _, c := range pool.Status.Conditions {
-		if c.Type == mcov1alpha1.ConditionRenderDegraded {
+		if c.Type == mcov1alpha1.ConditionDegraded {
 			foundRenderDegraded = true
 			if c.Status != metav1.ConditionTrue {
 				t.Errorf("RenderDegraded status = %s, want True", c.Status)
@@ -982,7 +983,7 @@ func TestSetRenderDegradedCondition(t *testing.T) {
 	}
 }
 
-// TestSetRenderDegradedCondition_AlsoSetsDegraded verifies Degraded is also set.
+// TestSetRenderDegradedCondition_AlsoSetsDegraded verifies Degraded is set with RenderFailed reason.
 func TestSetRenderDegradedCondition_AlsoSetsDegraded(t *testing.T) {
 	pool := &mcov1alpha1.MachineConfigPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "worker"},
@@ -990,7 +991,7 @@ func TestSetRenderDegradedCondition_AlsoSetsDegraded(t *testing.T) {
 
 	SetRenderDegradedCondition(pool, "merge error")
 
-	// Check Degraded condition is also set
+	// Check Degraded condition is set with RenderFailed reason
 	var foundDegraded bool
 	for _, c := range pool.Status.Conditions {
 		if c.Type == mcov1alpha1.ConditionDegraded {
@@ -998,13 +999,13 @@ func TestSetRenderDegradedCondition_AlsoSetsDegraded(t *testing.T) {
 			if c.Status != metav1.ConditionTrue {
 				t.Errorf("Degraded status = %s, want True", c.Status)
 			}
-			if c.Reason != "RenderDegraded" {
-				t.Errorf("Degraded reason = %s, want RenderDegraded", c.Reason)
+			if c.Reason != "RenderFailed" {
+				t.Errorf("Degraded reason = %s, want RenderFailed", c.Reason)
 			}
 		}
 	}
 	if !foundDegraded {
-		t.Error("Degraded condition should be set when RenderDegraded is set")
+		t.Error("Degraded condition should be set when render fails")
 	}
 }
 
@@ -1015,7 +1016,7 @@ func TestClearRenderDegradedCondition(t *testing.T) {
 		Status: mcov1alpha1.MachineConfigPoolStatus{
 			Conditions: []metav1.Condition{
 				{
-					Type:   mcov1alpha1.ConditionRenderDegraded,
+					Type:   mcov1alpha1.ConditionDegraded,
 					Status: metav1.ConditionTrue,
 					Reason: "RenderFailed",
 				},
@@ -1027,7 +1028,7 @@ func TestClearRenderDegradedCondition(t *testing.T) {
 
 	// Check RenderDegraded is now False
 	for _, c := range pool.Status.Conditions {
-		if c.Type == mcov1alpha1.ConditionRenderDegraded {
+		if c.Type == mcov1alpha1.ConditionDegraded {
 			if c.Status != metav1.ConditionFalse {
 				t.Errorf("RenderDegraded status = %s, want False", c.Status)
 			}
@@ -1048,7 +1049,7 @@ func TestSetRenderDegradedCondition_UpdatesExisting(t *testing.T) {
 		Status: mcov1alpha1.MachineConfigPoolStatus{
 			Conditions: []metav1.Condition{
 				{
-					Type:               mcov1alpha1.ConditionRenderDegraded,
+					Type:               mcov1alpha1.ConditionDegraded,
 					Status:             metav1.ConditionFalse,
 					Reason:             "RenderSuccess",
 					LastTransitionTime: oldTime,
@@ -1065,7 +1066,7 @@ func TestSetRenderDegradedCondition_UpdatesExisting(t *testing.T) {
 	}
 
 	for _, c := range pool.Status.Conditions {
-		if c.Type == mcov1alpha1.ConditionRenderDegraded {
+		if c.Type == mcov1alpha1.ConditionDegraded {
 			if c.Status != metav1.ConditionTrue {
 				t.Errorf("RenderDegraded status = %s, want True", c.Status)
 			}
@@ -1292,5 +1293,232 @@ func TestAggregateStatus_MixedTimeoutAndNormal(t *testing.T) {
 	// TimedOutNodes should only have the timed out one
 	if len(status.TimedOutNodes) != 1 || status.TimedOutNodes[0] != "worker-1" {
 		t.Errorf("TimedOutNodes = %v, want [worker-1]", status.TimedOutNodes)
+	}
+}
+
+// Tests for CleanupLegacyConditions migration from deprecated conditions.
+
+func TestCleanupLegacyConditions_RemovesUpdatedCondition(t *testing.T) {
+	pool := &mcov1alpha1.MachineConfigPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool"},
+		Status: mcov1alpha1.MachineConfigPoolStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   "Updated", // Deprecated condition
+					Status: metav1.ConditionTrue,
+					Reason: "AllNodesUpdated",
+				},
+				{
+					Type:   mcov1alpha1.ConditionDegraded,
+					Status: metav1.ConditionFalse,
+					Reason: "NoErrors",
+				},
+			},
+		},
+	}
+
+	cleaned := CleanupLegacyConditions(pool)
+
+	if !cleaned {
+		t.Error("Expected cleanup to return true when legacy conditions exist")
+	}
+	if len(pool.Status.Conditions) != 1 {
+		t.Errorf("Expected 1 condition after cleanup, got %d", len(pool.Status.Conditions))
+	}
+	if pool.Status.Conditions[0].Type != mcov1alpha1.ConditionDegraded {
+		t.Errorf("Expected Degraded condition to remain, got %s", pool.Status.Conditions[0].Type)
+	}
+}
+
+func TestCleanupLegacyConditions_RemovesRenderDegradedCondition(t *testing.T) {
+	pool := &mcov1alpha1.MachineConfigPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool"},
+		Status: mcov1alpha1.MachineConfigPoolStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   "RenderDegraded", // Deprecated condition
+					Status: metav1.ConditionTrue,
+					Reason: "RenderFailed",
+				},
+				{
+					Type:   mcov1alpha1.ConditionReady,
+					Status: metav1.ConditionTrue,
+					Reason: "AllNodesUpdated",
+				},
+			},
+		},
+	}
+
+	cleaned := CleanupLegacyConditions(pool)
+
+	if !cleaned {
+		t.Error("Expected cleanup to return true when legacy conditions exist")
+	}
+	if len(pool.Status.Conditions) != 1 {
+		t.Errorf("Expected 1 condition after cleanup, got %d", len(pool.Status.Conditions))
+	}
+	if pool.Status.Conditions[0].Type != mcov1alpha1.ConditionReady {
+		t.Errorf("Expected Ready condition to remain, got %s", pool.Status.Conditions[0].Type)
+	}
+}
+
+func TestCleanupLegacyConditions_RemovesBothLegacyConditions(t *testing.T) {
+	pool := &mcov1alpha1.MachineConfigPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool"},
+		Status: mcov1alpha1.MachineConfigPoolStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   "Updated", // Legacy
+					Status: metav1.ConditionTrue,
+				},
+				{
+					Type:   "RenderDegraded", // Legacy
+					Status: metav1.ConditionFalse,
+				},
+				{
+					Type:   mcov1alpha1.ConditionReady, // Current
+					Status: metav1.ConditionTrue,
+				},
+				{
+					Type:   mcov1alpha1.ConditionDraining, // Current
+					Status: metav1.ConditionFalse,
+				},
+			},
+		},
+	}
+
+	cleaned := CleanupLegacyConditions(pool)
+
+	if !cleaned {
+		t.Error("Expected cleanup to return true")
+	}
+	if len(pool.Status.Conditions) != 2 {
+		t.Errorf("Expected 2 conditions after cleanup, got %d", len(pool.Status.Conditions))
+	}
+	// Check only current conditions remain
+	for _, c := range pool.Status.Conditions {
+		if c.Type == "Updated" || c.Type == "RenderDegraded" {
+			t.Errorf("Legacy condition %s should have been removed", c.Type)
+		}
+	}
+}
+
+func TestCleanupLegacyConditions_NoopWhenNoLegacyConditions(t *testing.T) {
+	pool := &mcov1alpha1.MachineConfigPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool"},
+		Status: mcov1alpha1.MachineConfigPoolStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   mcov1alpha1.ConditionReady,
+					Status: metav1.ConditionTrue,
+				},
+				{
+					Type:   mcov1alpha1.ConditionDegraded,
+					Status: metav1.ConditionFalse,
+				},
+			},
+		},
+	}
+
+	cleaned := CleanupLegacyConditions(pool)
+
+	if cleaned {
+		t.Error("Expected cleanup to return false when no legacy conditions exist")
+	}
+	if len(pool.Status.Conditions) != 2 {
+		t.Errorf("Expected 2 conditions to remain unchanged, got %d", len(pool.Status.Conditions))
+	}
+}
+
+func TestCleanupLegacyConditions_HandleNilPool(t *testing.T) {
+	cleaned := CleanupLegacyConditions(nil)
+
+	if cleaned {
+		t.Error("Expected cleanup to return false for nil pool")
+	}
+}
+
+func TestCleanupLegacyConditions_HandleEmptyConditions(t *testing.T) {
+	pool := &mcov1alpha1.MachineConfigPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool"},
+		Status:     mcov1alpha1.MachineConfigPoolStatus{},
+	}
+
+	cleaned := CleanupLegacyConditions(pool)
+
+	if cleaned {
+		t.Error("Expected cleanup to return false for empty conditions")
+	}
+}
+
+// Test for Draining condition behavior.
+
+func TestAggregateStatus_DrainingCondition_True(t *testing.T) {
+	// Create a node that is draining (cordoned + has drain-started-at annotation)
+	nodes := []corev1.Node{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "worker-1",
+				Annotations: map[string]string{
+					annotations.CurrentRevision: "workers-old",
+					annotations.DesiredRevision: "workers-new",
+					annotations.AgentState:      annotations.StateDone,
+					annotations.Cordoned:        "true",
+					annotations.DrainStartedAt:  time.Now().Format(time.RFC3339),
+				},
+			},
+			Spec: corev1.NodeSpec{
+				Unschedulable: true,
+			},
+		},
+	}
+
+	status := AggregateStatus("workers-new", nodes, 0)
+
+	if status.DrainingMachineCount != 1 {
+		t.Errorf("DrainingMachineCount = %d, want 1", status.DrainingMachineCount)
+	}
+
+	// Check Draining condition is True
+	foundDraining := false
+	for _, c := range status.Conditions {
+		if c.Type == mcov1alpha1.ConditionDraining {
+			if c.Status != metav1.ConditionTrue {
+				t.Errorf("Draining condition status = %s, want True", c.Status)
+			}
+			foundDraining = true
+			break
+		}
+	}
+	if !foundDraining {
+		t.Error("Draining condition not found")
+	}
+}
+
+func TestAggregateStatus_DrainingCondition_False(t *testing.T) {
+	// Create a node that is NOT draining
+	nodes := []corev1.Node{
+		makeNode("worker-1", "workers-new", annotations.StateDone),
+	}
+
+	status := AggregateStatus("workers-new", nodes, 0)
+
+	if status.DrainingMachineCount != 0 {
+		t.Errorf("DrainingMachineCount = %d, want 0", status.DrainingMachineCount)
+	}
+
+	// Check Draining condition is False
+	foundDraining := false
+	for _, c := range status.Conditions {
+		if c.Type == mcov1alpha1.ConditionDraining {
+			if c.Status != metav1.ConditionFalse {
+				t.Errorf("Draining condition status = %s, want False", c.Status)
+			}
+			foundDraining = true
+			break
+		}
+	}
+	if !foundDraining {
+		t.Error("Draining condition not found")
 	}
 }

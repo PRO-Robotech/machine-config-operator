@@ -735,7 +735,7 @@ func TestReconcile_EmptyMachineConfigList_NoRollout(t *testing.T) {
 		t.Errorf("RMC count = %d, want 0 for empty pool", len(rmcList.Items))
 	}
 
-	// Verify pool status is updated (AC-005)
+	// Verify pool status is updated.
 	updatedPool := &mcov1alpha1.MachineConfigPool{}
 	if err := r.Get(context.Background(), client.ObjectKey{Name: "worker"}, updatedPool); err != nil {
 		t.Fatalf("Failed to get pool: %v", err)
@@ -897,5 +897,47 @@ func TestEnsureRMC_NoCollision_ReusesExisting(t *testing.T) {
 	// Verify existing RMC was reused (no suffix)
 	if rmc.Name != existingRMC.Name {
 		t.Errorf("RMC name = %q, want %q (should reuse existing with matching hash)", rmc.Name, existingRMC.Name)
+	}
+}
+
+// TestIsSelfNode_MatchingSelfNodeName tests that isSelfNode returns true for matching node.
+func TestIsSelfNode_MatchingSelfNodeName(t *testing.T) {
+	r := &MachineConfigPoolReconciler{
+		selfNodeName: "node-1",
+	}
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
+	}
+
+	if !r.isSelfNode(node) {
+		t.Error("isSelfNode() should return true for matching node")
+	}
+}
+
+// TestIsSelfNode_DifferentNode tests that isSelfNode returns false for different node.
+func TestIsSelfNode_DifferentNode(t *testing.T) {
+	r := &MachineConfigPoolReconciler{
+		selfNodeName: "node-1",
+	}
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-2"},
+	}
+
+	if r.isSelfNode(node) {
+		t.Error("isSelfNode() should return false for different node")
+	}
+}
+
+// TestIsSelfNode_EmptySelfNodeName tests that isSelfNode returns false when selfNodeName is empty.
+func TestIsSelfNode_EmptySelfNodeName(t *testing.T) {
+	r := &MachineConfigPoolReconciler{
+		selfNodeName: "",
+	}
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
+	}
+
+	if r.isSelfNode(node) {
+		t.Error("isSelfNode() should return false when selfNodeName is empty (no self-check)")
 	}
 }

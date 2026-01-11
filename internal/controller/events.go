@@ -57,6 +57,12 @@ const (
 
 	// ReasonRolloutComplete indicates all nodes have been updated.
 	ReasonRolloutComplete = "RolloutComplete"
+
+	// ReasonSelfNodeDrainSkipped indicates drain was skipped for the controller's own node.
+	ReasonSelfNodeDrainSkipped = "SelfNodeDrainSkipped"
+
+	// ReasonDrainFailed indicates a drain attempt failed (will retry).
+	ReasonDrainFailed = "DrainFailed"
 )
 
 // EventRecorder provides methods to emit Kubernetes events for rolling update lifecycle.
@@ -87,22 +93,24 @@ func (e *EventRecorder) PoolOverlapResolved(pool *mcov1alpha1.MachineConfigPool)
 		"Pool overlap resolved")
 }
 
-// NodeCordonStarted emits a normal event when a node is cordoned for update.
+// NodeCordonStarted emits a WARNING event when a node is cordoned for update.
+// Warning because cordon is a destructive action - node becomes unschedulable.
 func (e *EventRecorder) NodeCordonStarted(pool *mcov1alpha1.MachineConfigPool, nodeName string) {
 	if e.recorder == nil {
 		return
 	}
-	e.recorder.Eventf(pool, corev1.EventTypeNormal, ReasonNodeCordon,
-		"Node %s cordoned for update", nodeName)
+	e.recorder.Eventf(pool, corev1.EventTypeWarning, ReasonNodeCordon,
+		"Node %s cordoned for update (unschedulable)", nodeName)
 }
 
-// NodeDrainStarted emits a normal event when drain is started on a node.
+// NodeDrainStarted emits a WARNING event when drain is started on a node.
+// Warning because drain is a destructive action - pods are being evicted.
 func (e *EventRecorder) NodeDrainStarted(pool *mcov1alpha1.MachineConfigPool, nodeName string) {
 	if e.recorder == nil {
 		return
 	}
-	e.recorder.Eventf(pool, corev1.EventTypeNormal, ReasonNodeDrain,
-		"Drain started on node %s", nodeName)
+	e.recorder.Eventf(pool, corev1.EventTypeWarning, ReasonNodeDrain,
+		"Drain started on node %s (evicting pods)", nodeName)
 }
 
 // DrainStuck emits a warning event when drain exceeds timeout.
@@ -163,6 +171,24 @@ func (e *EventRecorder) RolloutComplete(pool *mcov1alpha1.MachineConfigPool) {
 	}
 	e.recorder.Event(pool, corev1.EventTypeNormal, ReasonRolloutComplete,
 		"All nodes updated to target revision")
+}
+
+// SelfNodeDrainSkipped emits a warning event when drain is skipped for the controller's own node.
+func (e *EventRecorder) SelfNodeDrainSkipped(pool *mcov1alpha1.MachineConfigPool, nodeName string) {
+	if e.recorder == nil {
+		return
+	}
+	e.recorder.Eventf(pool, corev1.EventTypeWarning, ReasonSelfNodeDrainSkipped,
+		"Drain skipped for node %s: controller runs on this node. Config will be applied without drain. Manual intervention may be required for reboot.", nodeName)
+}
+
+// DrainFailed emits a warning event when a drain attempt fails (will be retried).
+func (e *EventRecorder) DrainFailed(pool *mcov1alpha1.MachineConfigPool, nodeName, reason string) {
+	if e.recorder == nil {
+		return
+	}
+	e.recorder.Eventf(pool, corev1.EventTypeWarning, ReasonDrainFailed,
+		"Drain failed on node %s: %s (will retry)", nodeName, reason)
 }
 
 // CreateEventRecorder creates an EventRecorder from a manager's scheme.

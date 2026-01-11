@@ -58,7 +58,7 @@ func ProcessNodeUpdate(
 	// This prevents new nodes from blocking other nodes during rollout.
 	currentRevision := annotations.GetAnnotation(node.Annotations, annotations.CurrentRevision)
 	poolAnnotation := annotations.GetAnnotation(node.Annotations, annotations.Pool)
-	isCordoned := annotations.GetAnnotation(node.Annotations, annotations.Cordoned) == "true"
+	isCordoned := annotations.GetBoolAnnotation(node.Annotations, annotations.Cordoned)
 	isNewNode := currentRevision == "" && poolAnnotation == "" && !isCordoned && !node.Spec.Unschedulable
 	poolHasExistingConfig := pool.Status.LastSuccessfulRevision != ""
 	if isNewNode && poolHasExistingConfig {

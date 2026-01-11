@@ -29,7 +29,7 @@ func CordonNode(ctx context.Context, c client.Client, node *corev1.Node) error {
 		if current.Annotations == nil {
 			current.Annotations = make(map[string]string)
 		}
-		current.Annotations[annotations.Cordoned] = "true"
+		current.Annotations[annotations.Cordoned] = annotations.ValueTrue
 
 		if err := c.Update(ctx, current); err != nil {
 			return err

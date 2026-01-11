@@ -36,6 +36,30 @@ linters:
           - dupl
           - lll
         path: internal/*
+      - linters:
+          - errcheck
+          - goconst
+          - unparam
+          - ineffassign
+          - staticcheck
+        path: _test\.go$
+      # syscall.Sync is fire-and-forget
+      - linters:
+          - errcheck
+        path: internal/agent/reboot/executor\.go
+        text: "syscall.Sync"
+      # Complex reconcile function - acceptable
+      - linters:
+          - gocyclo
+        path: internal/controller/machineconfigpool_controller\.go
+      # log := log.FromContext is idiomatic pattern
+      - linters:
+          - revive
+        text: "import-shadowing.*log"
+      # prealloc is a suggestion, not required
+      - linters:
+          - prealloc
+        path: internal/controller/
     paths:
       - third_party$
       - builtin$

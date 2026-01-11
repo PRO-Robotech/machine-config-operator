@@ -66,6 +66,14 @@ const (
 	DesiredRevisionSetAt = Prefix + "desired-revision-set-at"
 )
 
+// Boolean annotation values.
+const (
+	// ValueTrue is the string "true" used for boolean annotations.
+	ValueTrue = "true"
+	// ValueFalse is the string "false" used for boolean annotations.
+	ValueFalse = "false"
+)
+
 // Agent state values.
 const (
 	// StateIdle means the agent is waiting for work.
@@ -93,7 +101,7 @@ func GetAnnotation(annotations map[string]string, key string) string {
 // GetBoolAnnotation gets an annotation as a boolean.
 // Returns true only if the annotation value is exactly "true".
 func GetBoolAnnotation(annotations map[string]string, key string) bool {
-	return GetAnnotation(annotations, key) == "true"
+	return GetAnnotation(annotations, key) == ValueTrue
 }
 
 // SetAnnotation sets an annotation value, creating the map if nil.

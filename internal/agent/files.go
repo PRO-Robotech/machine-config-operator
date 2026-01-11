@@ -31,6 +31,12 @@ import (
 	mcov1alpha1 "in-cloud.io/machine-config/api/v1alpha1"
 )
 
+// File state constants.
+const (
+	FileStatePresent = "present"
+	FileStateAbsent  = "absent"
+)
+
 // FileApplyResult contains the result of a file apply operation.
 type FileApplyResult struct {
 	Path    string
@@ -90,15 +96,15 @@ func (a *FileApplier) Apply(f mcov1alpha1.FileSpec) FileApplyResult {
 
 	state := f.State
 	if state == "" {
-		state = "present"
+		state = FileStatePresent
 	}
 
 	switch state {
-	case "absent":
+	case FileStateAbsent:
 		applied, err := a.deleteFile(path)
 		result.Applied = applied
 		result.Error = err
-	case "present":
+	case FileStatePresent:
 		applied, err := a.writeFile(path, f)
 		result.Applied = applied
 		result.Error = err

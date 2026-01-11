@@ -89,7 +89,7 @@ func IsNodeUnavailable(node *corev1.Node) bool {
 		return false
 	}
 
-	if ann[annotations.Cordoned] == "true" {
+	if ann[annotations.Cordoned] == annotations.ValueTrue {
 		return true
 	}
 

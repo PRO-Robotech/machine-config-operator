@@ -31,6 +31,9 @@ import (
 // DefaultApplyTimeoutSeconds is the default timeout for node apply operations.
 const DefaultApplyTimeoutSeconds = 600
 
+// ReasonRenderFailed is the reason for Degraded condition when rendering fails.
+const ReasonRenderFailed = "RenderFailed"
+
 // AggregatedStatus contains the computed pool status derived from node states.
 type AggregatedStatus struct {
 	TargetRevision          string
@@ -412,7 +415,7 @@ func SetRenderDegradedCondition(pool *mcov1alpha1.MachineConfigPool, message str
 	setCondition(pool, metav1.Condition{
 		Type:               mcov1alpha1.ConditionDegraded,
 		Status:             metav1.ConditionTrue,
-		Reason:             "RenderFailed",
+		Reason:             ReasonRenderFailed,
 		Message:            message,
 		LastTransitionTime: now,
 	})
@@ -423,7 +426,7 @@ func SetRenderDegradedCondition(pool *mcov1alpha1.MachineConfigPool, message str
 func ClearRenderDegradedCondition(pool *mcov1alpha1.MachineConfigPool) {
 	// Only clear Degraded if reason is RenderFailed
 	for i, c := range pool.Status.Conditions {
-		if c.Type == mcov1alpha1.ConditionDegraded && c.Reason == "RenderFailed" {
+		if c.Type == mcov1alpha1.ConditionDegraded && c.Reason == ReasonRenderFailed {
 			pool.Status.Conditions[i] = metav1.Condition{
 				Type:               mcov1alpha1.ConditionDegraded,
 				Status:             metav1.ConditionFalse,

@@ -68,6 +68,20 @@ func (mr *MockNodeAnnotationWriterMockRecorder) SetCurrentRevision(ctx, revision
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetCurrentRevision", reflect.TypeOf((*MockNodeAnnotationWriter)(nil).SetCurrentRevision), ctx, revision)
 }
 
+// SetDone mocks base method.
+func (m *MockNodeAnnotationWriter) SetDone(ctx context.Context, revision string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SetDone", ctx, revision)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// SetDone indicates an expected call of SetDone.
+func (mr *MockNodeAnnotationWriterMockRecorder) SetDone(ctx, revision any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetDone", reflect.TypeOf((*MockNodeAnnotationWriter)(nil).SetDone), ctx, revision)
+}
+
 // SetRebootPending mocks base method.
 func (m *MockNodeAnnotationWriter) SetRebootPending(ctx context.Context, pending bool) error {
 	m.ctrl.T.Helper()

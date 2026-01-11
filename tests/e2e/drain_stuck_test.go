@@ -47,15 +47,35 @@ var _ = Describe("Drain Stuck", Ordered, func() {
 		// Clean up any leftover resources from previous test runs
 		cleanupAllMCOResources()
 
-		By("getting a worker node for drain test")
-		cmd := exec.Command("kubectl", "get", "nodes", "-o", "name")
+		By("finding a worker node that is NOT running the controller")
+		// The controller skips drain for its own node to prevent self-disruption.
+		// We need to find a worker node that is NOT hosting the controller pod.
+
+		// Get the node where controller is running
+		cmd := exec.Command("kubectl", "get", "pod", "-n", "machine-config-system",
+			"-l", "control-plane=controller-manager", "-o", "jsonpath={.items[0].spec.nodeName}")
+		controllerNode, err := testutil.Run(cmd)
+		Expect(err).NotTo(HaveOccurred())
+		By(fmt.Sprintf("Controller is running on node: %s", controllerNode))
+
+		// Get all worker nodes (not control-plane)
+		cmd = exec.Command("kubectl", "get", "nodes",
+			"-l", "!node-role.kubernetes.io/control-plane", "-o", "name")
 		output, err := testutil.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
-		nodeNames := testutil.GetNonEmptyLines(output)
-		Expect(len(nodeNames)).To(BeNumerically(">=", 2), "Need at least 2 nodes")
+		workerNodes := testutil.GetNonEmptyLines(output)
+		Expect(len(workerNodes)).To(BeNumerically(">=", 2), "Need at least 2 worker nodes")
 
-		testNode = nodeNames[1][5:] // strip "node/", use second node
-		By(fmt.Sprintf("Using node %s for drain test", testNode))
+		// Find a worker node that is NOT the controller node
+		for _, nodeName := range workerNodes {
+			name := nodeName[5:] // strip "node/"
+			if name != controllerNode {
+				testNode = name
+				break
+			}
+		}
+		Expect(testNode).NotTo(BeEmpty(), "Could not find a worker node that is not the controller node")
+		By(fmt.Sprintf("Using node %s for drain test (controller is on %s)", testNode, controllerNode))
 
 		By("labeling test node")
 		Expect(labelNode(testNode, "node-role.kubernetes.io/drain-test=")).To(Succeed())
@@ -75,9 +95,33 @@ var _ = Describe("Drain Stuck", Ordered, func() {
 
 	Context("when PDB blocks drain", func() {
 		BeforeEach(func() {
+			By("cleaning up any leftover resources from previous tests")
+			_ = deleteResource("mc", "drain-test-mc")
+			_ = deleteResource("mcp", poolName)
+			_ = deleteResource("pdb", pdbName)
+			_ = deleteResource("deployment", deployName)
+			_ = uncordonNode(testNode)
+
+			By("setting up node as previously managed by MCO (not a new node)")
+			// The controller skips cordon/drain for newly added nodes.
+			// To trigger the drain flow, we need the node to appear as previously
+			// managed by MCO with an old revision that differs from the target.
+			_ = clearNodeMCOAnnotations(testNode)
+			// Set a dummy current-revision so the node is not considered "new"
+			cmd := exec.Command("kubectl", "annotate", "node", testNode,
+				"mco.in-cloud.io/current-revision=old-revision-before-drain-test", "--overwrite")
+			_, _ = testutil.Run(cmd)
+			// Set pool annotation
+			cmd = exec.Command("kubectl", "annotate", "node", testNode,
+				"mco.in-cloud.io/pool="+poolName, "--overwrite")
+			_, _ = testutil.Run(cmd)
+			// Set agent-state to done
+			cmd = exec.Command("kubectl", "annotate", "node", testNode,
+				"mco.in-cloud.io/agent-state=done", "--overwrite")
+			_, _ = testutil.Run(cmd)
+
 			By("ensuring no old pods exist from previous test")
 			// Wait for any old pods to be fully deleted to avoid race conditions.
-			// The AfterEach deletes resources but doesn't wait for pods to terminate.
 			Eventually(func() (int, error) {
 				cmd := exec.Command("kubectl", "get", "pods", "-l", "app="+deployName,
 					"-o", "jsonpath={.items}", "-n", testNs)
@@ -197,7 +241,43 @@ spec:
 `, poolName, time.Now().Format(time.RFC3339))
 			Expect(applyYAML(yaml)).To(Succeed())
 
-			By("waiting for DrainStuck condition")
+			By("waiting for RMC to be created (controller processing)")
+			Eventually(func() (bool, error) {
+				cmd := exec.Command("kubectl", "get", "rmc", "-l", "mco.in-cloud.io/pool="+poolName,
+					"-o", "jsonpath={.items[0].metadata.name}")
+				output, err := testutil.Run(cmd)
+				if err != nil {
+					return false, nil // Not found yet
+				}
+				return output != "", nil
+			}, 30*time.Second, 2*time.Second).Should(BeTrue(), "RMC should be created")
+
+			By("waiting for node to be cordoned (controller started rollout)")
+			// The controller should cordon the node because:
+			// 1. Node's current-revision differs from target RMC
+			// 2. Node has pool annotation matching this pool
+			// 3. Node has agent-state=done (can be updated)
+			Eventually(func() (bool, error) {
+				cmd := exec.Command("kubectl", "get", "node", testNode, "-o", "jsonpath={.spec.unschedulable}")
+				output, err := testutil.Run(cmd)
+				if err != nil {
+					return false, err
+				}
+				return output == "true", nil
+			}, 120*time.Second, 2*time.Second).Should(BeTrue(), "node should be cordoned to start drain")
+
+			By("verifying drain has started (DrainStartedAt annotation)")
+			Eventually(func() (bool, error) {
+				cmd := exec.Command("kubectl", "get", "node", testNode,
+					"-o", "jsonpath={.metadata.annotations['mco\\.in-cloud\\.io/drain-started-at']}")
+				output, err := testutil.Run(cmd)
+				if err != nil {
+					return false, err
+				}
+				return output != "", nil
+			}, 30*time.Second, 2*time.Second).Should(BeTrue(), "drain-started-at annotation should be set")
+
+			By("waiting for DrainStuck condition (drain timeout 60s + buffer)")
 			Eventually(func() (string, error) {
 				return getPoolCondition(ctx, poolName, "DrainStuck")
 			}, 120*time.Second, 2*time.Second).Should(Equal("True"))

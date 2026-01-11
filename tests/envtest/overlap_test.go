@@ -108,9 +108,9 @@ var _ = Describe("Pool Overlap Detection", func() {
 			Expect(hasDesiredRevision).To(BeFalse(),
 				"conflicting node should NOT have desired-revision annotation")
 
-			By("verifying MCP is not Updated")
-			Expect(meta.IsStatusConditionTrue(mcp1.Status.Conditions, "Updated")).To(BeFalse(),
-				"pool1 should NOT have Updated=True while overlap exists")
+			By("verifying MCP is not Ready while overlap exists")
+			Expect(meta.IsStatusConditionTrue(mcp1.Status.Conditions, mcov1alpha1.ConditionReady)).To(BeFalse(),
+				"pool1 should NOT have Ready=True while overlap exists")
 		})
 	})
 

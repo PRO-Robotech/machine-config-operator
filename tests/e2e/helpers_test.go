@@ -181,12 +181,30 @@ func isPoolUpdated(ctx context.Context, poolName string) (bool, error) {
 		return false, nil
 	}
 
+	// Pool must have a TargetRevision to be considered updated
+	// (prevents race condition when pool reconciles before MC is visible)
+	if status.TargetRevision == "" {
+		return false, nil
+	}
+
 	return status.UpdatedMachineCount == status.MachineCount &&
 		status.ReadyMachineCount == status.MachineCount &&
 		status.UpdatingMachineCount == 0 &&
 		status.DegradedMachineCount == 0 &&
 		status.CordonedMachineCount == 0 &&
 		status.DrainingMachineCount == 0, nil
+}
+
+// isPoolReady checks if pool has been reconciled and has nodes.
+// Unlike isPoolUpdated, this does NOT require TargetRevision to be set.
+// Use this for pools that may not have any MachineConfigs yet.
+func isPoolReady(ctx context.Context, poolName string) (bool, error) {
+	status, err := getPoolStatus(ctx, poolName)
+	if err != nil {
+		return false, err
+	}
+	// Pool is "ready" when controller has seen it and populated MachineCount
+	return status.MachineCount > 0, nil
 }
 
 func getWorkerNodes() ([]string, error) {
@@ -495,6 +513,27 @@ func uncordonNode(nodeName string) error {
 	return nil
 }
 
+// clearNodeMCOAnnotations removes ALL MCO annotations from a node.
+// This is useful before tests that need the node to appear "new" to MCO.
+func clearNodeMCOAnnotations(nodeName string) error {
+	annotations := []string{
+		"mco.in-cloud.io/desired-revision",
+		"mco.in-cloud.io/current-revision",
+		"mco.in-cloud.io/agent-state",
+		"mco.in-cloud.io/cordoned",
+		"mco.in-cloud.io/drain-started-at",
+		"mco.in-cloud.io/drain-retry-count",
+		"mco.in-cloud.io/reboot-pending",
+		"mco.in-cloud.io/last-error",
+		"mco.in-cloud.io/desired-revision-set-at",
+	}
+	for _, ann := range annotations {
+		cmd := exec.Command("kubectl", "annotate", "node", nodeName, ann+"-")
+		_, _ = testutil.Run(cmd) // Ignore errors (annotation might not exist)
+	}
+	return nil
+}
+
 // uncordonAllWorkerNodes uncordons all worker nodes - useful for cleanup between tests
 func uncordonAllWorkerNodes() {
 	nodes, err := getWorkerNodes()
@@ -576,6 +615,53 @@ func getRMCsByPool(poolName string) ([]string, error) {
 		return nil, nil
 	}
 	return strings.Fields(output), nil
+}
+
+// getPoolMachineCount returns the machineCount from pool status
+func getPoolMachineCount(ctx context.Context, poolName string) int {
+	cmd := exec.Command("kubectl", "get", "mcp", poolName,
+		"-o", "jsonpath={.status.machineCount}")
+	output, _ := testutil.Run(cmd)
+	var count int
+	fmt.Sscanf(output, "%d", &count)
+	return count
+}
+
+// getPoolUpdatedMachineCount returns the updatedMachineCount from pool status
+func getPoolUpdatedMachineCount(ctx context.Context, poolName string) int {
+	cmd := exec.Command("kubectl", "get", "mcp", poolName,
+		"-o", "jsonpath={.status.updatedMachineCount}")
+	output, _ := testutil.Run(cmd)
+	var count int
+	fmt.Sscanf(output, "%d", &count)
+	return count
+}
+
+// getControllerPodInfo returns the controller pod name and restart count
+func getControllerPodInfo() (podName string, restartCount int) {
+	cmd := exec.Command("kubectl", "get", "pod", "-n", namespace,
+		"-l", "control-plane=controller-manager",
+		"-o", "jsonpath={.items[0].metadata.name}")
+	output, err := testutil.Run(cmd)
+	if err != nil {
+		return "", 0
+	}
+	podName = strings.TrimSpace(output)
+
+	cmd = exec.Command("kubectl", "get", "pod", "-n", namespace, podName,
+		"-o", "jsonpath={.status.containerStatuses[0].restartCount}")
+	output, err = testutil.Run(cmd)
+	if err != nil {
+		return podName, 0
+	}
+	fmt.Sscanf(output, "%d", &restartCount)
+	return podName, restartCount
+}
+
+// getNodeUnschedulable checks if node is unschedulable (simpler version)
+func getNodeUnschedulable(nodeName string) bool {
+	result, _ := isNodeUnschedulable(nodeName)
+	return result
 }
 
 func _(pool *mcov1alpha1.MachineConfigPool) {}

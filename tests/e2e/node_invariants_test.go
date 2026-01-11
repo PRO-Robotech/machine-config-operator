@@ -137,4 +137,74 @@ spec:
 			}
 		})
 	})
+
+	Context("Status accuracy after rollout", func() {
+		const poolName = "e2e-status-accuracy"
+		const mcName = "e2e-status-accuracy-mc"
+
+		AfterEach(func() {
+			_ = deleteResource("mc", mcName)
+			_ = deleteResource("mcp", poolName)
+			uncordonAllWorkerNodes()
+		})
+
+		It("pool status should accurately reflect actual node counts", func() {
+			By("creating MachineConfigPool and MachineConfig")
+			poolYAML := fmt.Sprintf(`
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfigPool
+metadata:
+  name: %s
+spec:
+  nodeSelector:
+    matchLabels:
+      node-role.kubernetes.io/worker: ""
+  machineConfigSelector:
+    matchLabels:
+      mco.in-cloud.io/pool: %s
+  rollout:
+    maxUnavailable: 1
+    debounceSeconds: 1
+  reboot:
+    strategy: Never
+  paused: false
+`, poolName, poolName)
+			Expect(applyYAML(poolYAML)).To(Succeed())
+
+			mcYAML := fmt.Sprintf(`
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfig
+metadata:
+  name: %s
+  labels:
+    mco.in-cloud.io/pool: %s
+spec:
+  priority: 50
+  files:
+    - path: /etc/mco-test/status-accuracy.txt
+      content: "test file for status accuracy verification"
+      mode: 0644
+`, mcName, poolName)
+			Expect(applyYAML(mcYAML)).To(Succeed())
+
+			By("waiting for rollout to complete")
+			Eventually(func() (bool, error) {
+				return isPoolUpdated(context.Background(), poolName)
+			}, 120*time.Second, 5*time.Second).Should(BeTrue(), "pool should complete rollout")
+
+			By("verifying status counts match actual node state")
+			machineCount := getPoolMachineCount(context.Background(), poolName)
+			updatedCount := getPoolUpdatedMachineCount(context.Background(), poolName)
+
+			Expect(machineCount).To(BeNumerically(">", 0), "machineCount should be greater than 0")
+			Expect(updatedCount).To(Equal(machineCount),
+				"updatedMachineCount should equal machineCount after successful rollout")
+
+			By("verifying status matches actual node count")
+			workers, err := getWorkerNodes()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(machineCount).To(Equal(len(workers)),
+				"machineCount should match actual worker node count")
+		})
+	})
 })

@@ -92,7 +92,7 @@ spec:
 
 			By("waiting for pool to be ready")
 			Eventually(func() (bool, error) {
-				return isPoolUpdated(ctx, poolName)
+				return isPoolReady(ctx, poolName)
 			}, 60*time.Second, 2*time.Second).Should(BeTrue())
 		})
 
@@ -161,7 +161,7 @@ spec:
 			Expect(applyYAML(yaml)).To(Succeed())
 
 			Eventually(func() (bool, error) {
-				return isPoolUpdated(ctx, poolName)
+				return isPoolReady(ctx, poolName)
 			}, 60*time.Second, 2*time.Second).Should(BeTrue())
 		})
 
@@ -230,7 +230,7 @@ spec:
 			Expect(applyYAML(yaml)).To(Succeed())
 
 			Eventually(func() (bool, error) {
-				return isPoolUpdated(ctx, poolName)
+				return isPoolReady(ctx, poolName)
 			}, 60*time.Second, 2*time.Second).Should(BeTrue())
 		})
 
@@ -265,6 +265,58 @@ spec:
 			Eventually(func() (bool, error) {
 				return isPoolUpdated(ctx, poolName)
 			}, 5*time.Minute, 2*time.Second).Should(BeTrue())
+		})
+	})
+
+	Context("when pool has no MachineConfigs", func() {
+		const emptyPoolName = "e2e-empty-pool"
+
+		AfterEach(func() {
+			_ = deleteResource("mcp", emptyPoolName)
+			uncordonAllWorkerNodes()
+		})
+
+		It("nodes should remain schedulable without cordon or drain operations", func() {
+			By("creating MachineConfigPool without any matching MachineConfigs")
+			yaml := fmt.Sprintf(`
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfigPool
+metadata:
+  name: %s
+spec:
+  nodeSelector:
+    matchLabels:
+      node-role.kubernetes.io/worker: ""
+  machineConfigSelector:
+    matchLabels:
+      mco.in-cloud.io/pool: %s
+  rollout:
+    maxUnavailable: 1
+    debounceSeconds: 1
+  reboot:
+    strategy: Never
+  paused: false
+`, emptyPoolName, emptyPoolName)
+			Expect(applyYAML(yaml)).To(Succeed())
+
+			By("waiting 30 seconds to ensure no rollout is triggered")
+			time.Sleep(30 * time.Second)
+
+			By("verifying all nodes remain schedulable")
+			nodes, err := getWorkerNodes()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(len(nodes)).To(BeNumerically(">", 0), "expected at least one worker node")
+
+			for _, node := range nodes {
+				unschedulable := getNodeUnschedulable(node)
+				Expect(unschedulable).To(BeFalse(),
+					"node %s should remain schedulable when pool has no configs", node)
+			}
+
+			By("verifying pool status reflects node count")
+			Eventually(func() int {
+				return getPoolMachineCount(ctx, emptyPoolName)
+			}, 30*time.Second, 2*time.Second).Should(BeNumerically(">", 0))
 		})
 	})
 

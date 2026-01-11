@@ -10,7 +10,7 @@
 
 ```
 MachineConfigPool (status)
-├── conditions: Updated, Updating, Degraded, RenderDegraded, PoolOverlap, DrainStuck
+├── conditions: Ready, Updating, Draining, Degraded, PoolOverlap, DrainStuck
 ├── counters: machineCount, readyMachineCount, cordonedMachineCount, ...
 └── revisions: targetRevision, currentRevision, lastSuccessfulRevision
     │
@@ -69,61 +69,64 @@ status:
 kubectl get mcp worker -o jsonpath='{.status.conditions}' | jq .
 ```
 
-### Updated
+### Ready — главный индикатор здоровья
 
 ```yaml
-- type: Updated
-  status: "True"      # Все ноды на target revision
+- type: Ready
+  status: "True"      # Всё хорошо
   reason: AllNodesUpdated
-  message: "All 5 nodes are updated"
+  message: "All 5 nodes are at target revision"
 ```
 
-| status | Значение |
-|--------|----------|
-| True | Все ноды имеют target revision |
-| False | Есть ноды с другой revision |
+| status | reason | Значение |
+|--------|--------|----------|
+| True | AllNodesUpdated | Все ноды обновлены и нет ошибок |
+| False | RolloutInProgress | Идёт обновление |
+| False | Degraded | Есть ноды с ошибками |
+| False | NoMachineConfigs | Нет конфигов в пуле |
 
 ### Updating
 
 ```yaml
 - type: Updating
   status: "True"      # Идёт раскатка
-  reason: NodesUpdating
-  message: "3 of 5 nodes are applying configuration"
+  reason: RolloutInProgress
+  message: "Updating 3 nodes"
 ```
 
 | status | Значение |
 |--------|----------|
-| True | Хотя бы одна нода в состоянии `applying` |
-| False | Нет нод в состоянии `applying` |
+| True | Есть ноды не на target revision |
+| False | Все ноды на target revision |
+
+### Draining
+
+```yaml
+- type: Draining
+  status: "True"      # Drain в процессе
+  reason: NodesDraining
+  message: "2 nodes are currently draining"
+```
+
+| status | Значение |
+|--------|----------|
+| True | На нодах выполняется drain |
+| False | Нет активного drain |
 
 ### Degraded
 
 ```yaml
 - type: Degraded
   status: "True"      # Есть проблемы
-  reason: NodesDegraded
-  message: "2 nodes are in error state"
+  reason: NodeErrors
+  message: "2 nodes in error state"
 ```
 
-| status | Значение |
-|--------|----------|
-| True | Хотя бы одна нода в состоянии `error` |
-| False | Нет нод в состоянии `error` |
-
-### RenderDegraded
-
-```yaml
-- type: RenderDegraded
-  status: "True"      # Ошибка рендеринга
-  reason: RenderFailed
-  message: "Failed to render: invalid file path"
-```
-
-| status | Значение |
-|--------|----------|
-| True | Ошибка при создании RenderedMachineConfig |
-| False | Рендеринг работает нормально |
+| status | reason | Значение |
+|--------|--------|----------|
+| True | NodeErrors | Ноды в состоянии error |
+| True | RenderFailed | Ошибка создания RenderedMachineConfig |
+| False | NoErrors | Нет ошибок |
 
 ### PoolOverlap
 

@@ -90,12 +90,12 @@ kubectl get pdb -A
 2. Временно удалить/изменить PDB
 3. Вручную удалить зависший под
 
-### Condition: RenderDegraded
+### Condition: Degraded с Reason=RenderFailed
 
-**Симптом:** Condition `RenderDegraded` = True
+**Симптом:** Condition `Degraded` = True с `Reason: RenderFailed`
 
 ```bash
-kubectl get mcp worker -o jsonpath='{.status.conditions[?(@.type=="RenderDegraded")].message}'
+kubectl get mcp worker -o jsonpath='{.status.conditions[?(@.type=="Degraded")]}'
 ```
 
 **Частые причины:**

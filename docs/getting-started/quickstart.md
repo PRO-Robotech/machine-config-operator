@@ -106,10 +106,10 @@ EOF
 kubectl get mcp worker -w
 
 # Или проверить условия
-kubectl get mcp worker -o jsonpath='{.status.conditions[?(@.type=="Updated")].status}'
+kubectl get mcp worker -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
 ```
 
-Когда `Updated: True` — конфигурация применена на всех нодах.
+Когда `Ready: True` — конфигурация применена на всех нодах и нет ошибок.
 
 ---
 
@@ -156,7 +156,7 @@ kubectl exec -n mco-system $AGENT_POD -- cat /host/etc/myapp/config.yaml
          ↓
 12. Повторил для следующей ноды
          ↓
-13. Status Updated: True
+13. Status Ready: True
 ```
 
 ---

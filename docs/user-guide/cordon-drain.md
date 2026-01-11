@@ -128,6 +128,20 @@ spec:
 | DaemonSet pods | Будут пересозданы автоматически |
 | Static pods | Определены в манифестах на ноде |
 
+### События при Drain
+
+При начале drain эмитятся события типа **Warning** (деструктивные действия):
+
+```
+Warning  NodeCordon  Node node-1 cordoned for update (unschedulable)
+Warning  NodeDrain   Drain started on node node-1 (evicting pods)
+```
+
+При ошибках drain:
+```
+Warning  DrainFailed  Drain failed on node node-1: PDB blocked eviction (will retry)
+```
+
 ### Timeout и DrainStuck
 
 Если drain занимает больше `drainTimeoutSeconds`:

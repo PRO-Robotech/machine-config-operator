@@ -11,9 +11,10 @@ E2E тесты запускаются в Kind-кластере и проверя
 - Rolling Update с maxUnavailable
 - Cordon/Drain поведение
 - Pool Overlap detection
-- Условия ошибок (DrainStuck, RenderDegraded)
+- Условия ошибок (DrainStuck, Degraded)
 - Debounce механизм
 - История ревизий
+- Controller resilience (tolerations, self-node skip)
 
 ---
 

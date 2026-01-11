@@ -171,10 +171,18 @@ status:
   drainingMachineCount: 0     # Drain завершён, идёт apply
   
   conditions:
+  - type: Ready
+    status: "False"
+    reason: RolloutInProgress
+    message: "3 of 10 nodes updated"
   - type: Updating
     status: "True"
-    reason: RollingUpdate
-    message: "3 of 10 nodes updated, 1 updating"
+    reason: RolloutInProgress
+    message: "Updating 7 nodes"
+  - type: Draining
+    status: "True"
+    reason: NodesDraining
+    message: "1 nodes are currently draining"
 ```
 
 ### Статус нод

@@ -226,24 +226,42 @@ MCO Lite НЕ отменяет drain, а устанавливает condition `D
 
 | Condition | True когда | Severity |
 |-----------|------------|----------|
-| `Updated` | Все ноды имеют target revision | Info |
-| `Updating` | Хотя бы одна нода применяет конфиг | Info |
-| `Degraded` | Хотя бы одна нода в состоянии error | Warning |
-| `RenderDegraded` | Ошибка при создании RMC | Critical |
+| `Ready` | Все ноды на target revision и нет ошибок | Info |
+| `Updating` | Есть ноды с revision ≠ target | Info |
+| `Draining` | Выполняется drain на нодах | Info |
+| `Degraded` | Есть ноды в состоянии error или ошибка рендеринга | Warning |
 | `PoolOverlap` | Нода матчит несколько пулов | Critical |
 | `DrainStuck` | Drain превысил timeout | Warning |
+
+#### Ready — главный индикатор здоровья пула
+
+`Ready=True` означает:
+- Все ноды имеют target revision (`current == desired`)
+- Нет нод в состоянии error
+- Нет активного drain
+
+`Ready=False` с различными причинами:
+- `Reason=RolloutInProgress` — идёт обновление
+- `Reason=Degraded` — есть ошибки
+- `Reason=NoMachineConfigs` — пустой пул
+
+#### Degraded — индикатор проблем
+
+`Reason=NodeErrors` — ноды в состоянии error
+`Reason=RenderFailed` — ошибка создания RenderedMachineConfig
 
 ### Счётчики нод
 
 | Поле | Описание |
 |------|----------|
 | `machineCount` | Всего нод в пуле |
-| `readyMachineCount` | current == target AND state == done |
+| `readyMachineCount` | current == target AND state == done/idle |
 | `updatedMachineCount` | current == target |
-| `updatingMachineCount` | state == applying |
-| `degradedMachineCount` | state == error |
-| `cordonedMachineCount` | mco.in-cloud.io/cordoned == true |
-| `drainingMachineCount` | cordoned AND NOT done |
+| `updatingMachineCount` | state == applying (без timeout) |
+| `degradedMachineCount` | state == error OR apply timeout |
+| `unavailableMachineCount` | state != done AND state != idle (ноды, которые не готовы к работе) |
+| `cordonedMachineCount` | mco.in-cloud.io/cordoned == true OR spec.unschedulable |
+| `drainingMachineCount` | drain-started-at != "" |
 | `pendingRebootCount` | reboot-pending == true |
 
 ### Pool Overlap

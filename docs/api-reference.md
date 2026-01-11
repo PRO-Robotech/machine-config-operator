@@ -130,12 +130,24 @@ status:
 
 | Type | Status | Description |
 |------|--------|-------------|
-| `Updated` | True/False | All nodes have target revision |
-| `Updating` | True/False | At least one node is applying |
-| `Degraded` | True/False | At least one node has error |
-| `RenderDegraded` | True/False | Failed to create RMC |
+| `Ready` | True/False | All nodes updated and no errors |
+| `Updating` | True/False | At least one node not at target revision |
+| `Draining` | True/False | Drain operation in progress |
+| `Degraded` | True/False | At least one node has error (incl. render failures) |
 | `PoolOverlap` | True/False | Node matches multiple pools |
 | `DrainStuck` | True/False | Drain exceeded timeout |
+
+#### Condition Details
+
+**Ready**
+- `True`: All nodes have target revision and no errors
+- `False` + `Reason=RolloutInProgress`: Nodes are being updated
+- `False` + `Reason=Degraded`: Nodes have errors
+- `False` + `Reason=NoMachineConfigs`: No configs in pool
+
+**Degraded**
+- `Reason=NodeErrors`: Nodes in error state
+- `Reason=RenderFailed`: Failed to create RenderedMachineConfig
 
 ---
 
@@ -245,14 +257,16 @@ status:
 | `RolloutComplete` | Normal | All nodes updated |
 | `PoolOverlap` | Warning | Overlap detected |
 | `DrainStuck` | Warning | Drain timeout |
-| `RenderDegraded` | Warning | Render failed |
 
 ### Node Events
 
 | Reason | Type | Description |
 |--------|------|-------------|
-| `NodeCordoned` | Normal | Node cordoned for update |
+| `NodeCordon` | Warning | Node cordoned for update (destructive) |
+| `NodeDrain` | Warning | Drain started (destructive) |
+| `DrainFailed` | Warning | Drain attempt failed, will retry |
 | `NodeUncordoned` | Normal | Node returned to service |
+| `SelfNodeDrainSkipped` | Normal | Controller skipped drain of own node |
 | `ApplyStarted` | Normal | Config apply started |
 | `ApplyComplete` | Normal | Config applied successfully |
 | `ApplyFailed` | Warning | Config apply failed |

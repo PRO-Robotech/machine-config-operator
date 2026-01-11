@@ -258,8 +258,14 @@ status:
   drainingMachineCount: 0
   pendingRebootCount: 0
   conditions:
-    - type: Updated
+    - type: Ready
       status: "True"
+    - type: Updating
+      status: "False"
+    - type: Draining
+      status: "False"
+    - type: Degraded
+      status: "False"
 ```
 
 ### Ревизии
@@ -287,10 +293,10 @@ status:
 
 | Condition | True когда |
 |-----------|------------|
-| `Updated` | Все ноды имеют target revision |
+| `Ready` | Все ноды имеют target revision и в состоянии done |
 | `Updating` | Хотя бы одна нода применяет конфиг |
-| `Degraded` | Хотя бы одна нода в ошибке |
-| `RenderDegraded` | Ошибка при создании RMC |
+| `Draining` | Хотя бы одна нода в процессе drain |
+| `Degraded` | Хотя бы одна нода в ошибке ИЛИ ошибка рендеринга (Reason=RenderFailed) |
 | `PoolOverlap` | Нода матчит несколько пулов |
 | `DrainStuck` | Drain превысил timeout |
 

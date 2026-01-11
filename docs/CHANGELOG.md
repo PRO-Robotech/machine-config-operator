@@ -7,52 +7,76 @@
 
 ---
 
-## [0.1.2] - 2026-01-09
+## [0.1.2] - 2026-01-11
 
 ### Summary
 
-Релиз стабилизации, исправляющий баги, выявленные при E2E тестировании, и улучшающий документацию.
+Критический hotfix-релиз, исправляющий production-баги, выявленные при развёртывании v0.1.1 в реальном кластере. Включает breaking change в API условий (Conditions).
+
+### ⚠️ Breaking Changes
+
+- **Условия (Conditions) API** — изменена структура условий пула:
+  - **УДАЛЕНО:** `Updated` → используйте `Ready` вместо
+  - **УДАЛЕНО:** `RenderDegraded` → используйте `Degraded` с `Reason=RenderFailed`
+  - **ДОБАВЛЕНО:** `Ready` — главный индикатор готовности (True когда все ноды обновлены и нет ошибок)
+  - **ДОБАВЛЕНО:** `Draining` — True когда выполняется drain на нодах
+  - **СОХРАНЕНО:** `Updating`, `Degraded`, `PoolOverlap`, `DrainStuck`
+  - При обновлении с v0.1.1 устаревшие условия удаляются автоматически
 
 ### Исправлено
 
-- **Drain Timeout Grace Period** — исправлена ошибка, при которой hardcoded 10-минутная проверка игнорировала `drainTimeoutSeconds` < 600s
-  - Timeout теперь проверяется корректно согласно конфигурации
-  - Retry intervals пропорциональны configured timeout
-  - Добавлен minimum requeue floor (30s) для предотвращения busy-looping
+- **Rollout без MachineConfigs** — контроллер больше не начинает rollout при пустом пуле
+  - MCP без MachineConfig не запускает cordon/drain нод
+  - Решает проблему ложного обновления после создания пула
 
-- **Paused Node Unavailable Count** — исправлена ошибка, при которой паузированные ноды неправильно считались unavailable
-  - Pause check теперь выполняется перед cordon/drain проверками
-  - Паузированные ноды больше не потребляют `maxUnavailable` слоты
+- **Self-eviction контроллера** — контроллер больше не эвиктит свой собственный под
+  - Поды из namespace `machine-config-system` исключены из eviction
+  - Решает проблему deadlock когда контроллер убивает сам себя
 
-- **Duplicate Events in Retry Loop** — события `DrainStuck` и `RolloutComplete` больше не дублируются при retry
+- **Controller не drain'ит свою ноду** — контроллер пропускает drain для ноды, на которой работает
+  - Добавлена переменная окружения `NODE_NAME` через Downward API
+  - Эмитится событие `SelfNodeDrainSkipped` для мониторинга
+  - Метрика `mco_drain_self_skipped_total` для observability
 
-- **Hash Collision Dead Code** — исправлена обработка hash collision при создании RMC
-  - При коллизии теперь создаётся RMC с suffix вместо RenderDegraded
+- **Нода остаётся cordoned после reboot** — исправлена логика uncordon после перезагрузки
+  - Agent корректно устанавливает состояние `done` после startup
+  - Нода uncordon в течение 30 секунд после перезагрузки
 
-- **Controller Tolerations** — контроллер теперь может запускаться на control-plane нодах
-  - Добавлены tolerations для `node-role.kubernetes.io/control-plane` и `master`
-  - Используется `priorityClassName: system-cluster-critical`
-  - Решает проблему deadlock когда все worker ноды cordoned
+- **Stale status data** — статус пула теперь использует актуальные данные
+  - Ноды re-fetch перед вычислением статуса
+  - `updatedMachineCount` корректно отображает количество обновлённых нод
 
-- **RBAC for Events** — добавлены права на создание Kubernetes Events
+- **Новые ноды блокируются** — новые ноды в пуле больше не проходят через ненужный cordon/drain
+  - Ноды без MCO аннотаций определяются как "новые"
+  - `desired-revision` устанавливается напрямую без cordon/drain
 
-- **E2E Test Cleanup** — улучшена очистка ресурсов между тестами
-  - Добавлен `cleanupAllMCOResources()` helper
-  - Ноды uncordon после каждого теста
-  - Удаляются MCO аннотации
+- **Condition timestamp spam** — условия `DrainStuck` и `PoolOverlap` больше не вызывают постоянные обновления статуса
+  - `LastTransitionTime` сохраняется если статус не изменился
+  - Решает проблему "DDoS" MCP ресурса
+
+- **Controller Tolerations** — контроллер может работать на cordoned нодах
+  - Добавлены tolerations: `node.kubernetes.io/unschedulable`, `not-ready`, `unreachable`
+  - Решает проблему недоступности контроллера при cordoned нодах
+
+### Изменено
+
+- **Типы событий** — деструктивные действия теперь Warning:
+  - `NodeCordon` — Warning (нода становится unschedulable)
+  - `NodeDrain` — Warning (поды эвакуируются)
+  - Добавлено событие `DrainFailed` (Warning) при ошибках drain
 
 ### Добавлено
 
 - Конфигурируемый `drainRetrySeconds` для интервала retry drain
 - `lastSuccessfulRevision` в статусе пула
 - `desiredRevisionSetAt` аннотация для timeout detection
+- Метрика `mco_drain_self_skipped_total` для мониторинга пропуска self-drain
 
 ### Документация
 
 - Полностью переработана пользовательская документация
 - Добавлен глоссарий терминов
 - Добавлена документация E2E тестов
-- Добавлены диаграммы взаимодействий
 
 ---
 
@@ -188,23 +212,62 @@ groups:
 
 ### From v0.1.1 to v0.1.2
 
-v0.1.2 полностью обратно совместим. Исправления багов применяются автоматически.
+⚠️ **Breaking Change:** v0.1.2 изменяет API условий (Conditions).
+
+#### Автоматическая миграция
+
+При первом запуске контроллера v0.1.2:
+- Устаревшие условия `Updated` и `RenderDegraded` автоматически удаляются
+- Новые условия `Ready` и `Draining` создаются автоматически
+- Логируется сообщение: "cleaned up legacy conditions from v0.1.x"
+
+#### Обновление мониторинга
+
+**Обязательно** обновите Prometheus alerts и dashboards:
+
+```promql
+# СТАРОЕ: Updated condition
+kube_customresource_mco_machineconfigpool_status_condition{condition="Updated", status="true"}
+
+# НОВОЕ: Ready condition
+kube_customresource_mco_machineconfigpool_status_condition{condition="Ready", status="true"}
+```
 
 #### Рекомендации
 
-1. **Пересоздать controller deployment** для получения новых tolerations:
+1. **Обновить CRD и controller**:
 
 ```bash
-kubectl rollout restart deployment -n mco-system mco-controller
+make install
+make deploy IMG=<your-registry>/mco-controller:v0.1.2
 ```
 
-2. **Настроить drainRetrySeconds** при необходимости:
+2. **Перезапустить controller** для получения новых tolerations:
+
+```bash
+kubectl rollout restart deployment -n machine-config-system machine-config-controller-manager
+```
+
+3. **Настроить drainRetrySeconds** при необходимости:
 
 ```yaml
 spec:
   rollout:
     drainTimeoutSeconds: 3600
     drainRetrySeconds: 300    # Retry каждые 5 минут
+```
+
+4. **Добавить alert для нового условия Draining**:
+
+```yaml
+- alert: MCODrainingTooLong
+  expr: |
+    kube_customresource_mco_machineconfigpool_status_condition{condition="Draining", status="true"} == 1
+  for: 30m
+  labels:
+    severity: warning
+  annotations:
+    summary: "MCO draining nodes for too long"
 ```
 
 ---
@@ -225,11 +288,29 @@ spec:
 |-------|--------|-------------|
 | `lastSuccessfulRevision` | ADDED | Last successfully applied revision |
 
+#### Conditions (⚠️ Breaking)
+
+| Type | Change | Description |
+|------|--------|-------------|
+| `Ready` | ADDED | Primary health indicator (replaces Updated) |
+| `Draining` | ADDED | True when drain in progress |
+| `Updated` | REMOVED | Use `Ready` instead |
+| `RenderDegraded` | REMOVED | Use `Degraded` with Reason=RenderFailed |
+
 #### Node Annotations
 
 | Annotation | Change | Description |
 |------------|--------|-------------|
 | `mco.in-cloud.io/desired-revision-set-at` | ADDED | Timestamp for timeout detection |
+
+#### Kubernetes Events
+
+| Event | Change | Description |
+|-------|--------|-------------|
+| `NodeCordon` | CHANGED | Now Warning type (was Normal) |
+| `NodeDrain` | CHANGED | Now Warning type (was Normal) |
+| `DrainFailed` | ADDED | Warning on drain failures |
+| `SelfNodeDrainSkipped` | ADDED | Info when controller skips own node |
 
 ### v0.1.0 → v0.1.1
 

@@ -30,7 +30,7 @@ spec:
 EOF
 
 # 2. Дождаться применения
-kubectl wait --for=condition=Updated mcp/worker --timeout=120s
+kubectl wait --for=condition=Ready mcp/worker --timeout=120s
 
 # 3. Проверить файл на ноде
 kubectl exec -n mco-system $(kubectl get pod -n mco-system -l app=mco-agent -o name | head -1) -- \
@@ -55,7 +55,7 @@ kubectl delete mc test-file
 kubectl patch mc test-file --type=merge -p '{"spec":{"files":[{"path":"/etc/mco-test/verification.conf","state":"absent"}]}}'
 
 # 3. Дождаться применения
-kubectl wait --for=condition=Updated mcp/worker --timeout=120s
+kubectl wait --for=condition=Ready mcp/worker --timeout=120s
 
 # 4. Проверить что файл удалён
 kubectl exec -n mco-system $(kubectl get pod -n mco-system -l app=mco-agent -o name | head -1) -- \
@@ -202,7 +202,7 @@ kubectl get nodes -o jsonpath='{.items[*].metadata.annotations.mco\.in-cloud\.io
 kubectl patch mcp test-pause --type=merge -p '{"spec":{"paused":false}}'
 
 # 5. Проверить что теперь desired-revision установлен
-kubectl wait --for=condition=Updated mcp/test-pause --timeout=120s
+kubectl wait --for=condition=Ready mcp/test-pause --timeout=120s
 ```
 
 **Ожидаемый результат:** При paused — ноды не обновляются; после unpause — обновляются.
@@ -277,7 +277,7 @@ spec:
 EOF
 
 # Проверить reboot-pending
-kubectl wait --for=condition=Updated mcp/test-reboot --timeout=120s
+kubectl wait --for=condition=Ready mcp/test-reboot --timeout=120s
 kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}: {.metadata.annotations.mco\.in-cloud\.io/reboot-pending}{"\n"}{end}'
 ```
 
@@ -302,7 +302,9 @@ kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}: {.metadata.ann
 
 ### После обновления
 
-- [ ] Updated condition True: `kubectl get mcp <name> -o jsonpath='{.status.conditions[?(@.type=="Updated")].status}'`
+- [ ] Ready condition True: `kubectl get mcp <name> -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'`
+- [ ] Updating False: `kubectl get mcp <name> -o jsonpath='{.status.conditions[?(@.type=="Updating")].status}'`
+- [ ] Draining False: `kubectl get mcp <name> -o jsonpath='{.status.conditions[?(@.type=="Draining")].status}'`
 - [ ] Все ноды ready: `kubectl get mcp <name> -o jsonpath='{.status.readyMachineCount}'`
 - [ ] Нет degraded: `kubectl get mcp <name> -o jsonpath='{.status.degradedMachineCount}'`
 - [ ] Нет cordoned: `kubectl get mcp <name> -o jsonpath='{.status.cordonedMachineCount}'`

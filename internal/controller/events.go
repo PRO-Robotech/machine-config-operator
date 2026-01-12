@@ -58,9 +58,6 @@ const (
 	// ReasonRolloutComplete indicates all nodes have been updated.
 	ReasonRolloutComplete = "RolloutComplete"
 
-	// ReasonSelfNodeDrainSkipped indicates drain was skipped for the controller's own node.
-	ReasonSelfNodeDrainSkipped = "SelfNodeDrainSkipped"
-
 	// ReasonDrainFailed indicates a drain attempt failed (will retry).
 	ReasonDrainFailed = "DrainFailed"
 )
@@ -171,15 +168,6 @@ func (e *EventRecorder) RolloutComplete(pool *mcov1alpha1.MachineConfigPool) {
 	}
 	e.recorder.Event(pool, corev1.EventTypeNormal, ReasonRolloutComplete,
 		"All nodes updated to target revision")
-}
-
-// SelfNodeDrainSkipped emits a warning event when drain is skipped for the controller's own node.
-func (e *EventRecorder) SelfNodeDrainSkipped(pool *mcov1alpha1.MachineConfigPool, nodeName string) {
-	if e.recorder == nil {
-		return
-	}
-	e.recorder.Eventf(pool, corev1.EventTypeWarning, ReasonSelfNodeDrainSkipped,
-		"Drain skipped for node %s: controller runs on this node. Config will be applied without drain. Manual intervention may be required for reboot.", nodeName)
 }
 
 // DrainFailed emits a warning event when a drain attempt fails (will be retried).

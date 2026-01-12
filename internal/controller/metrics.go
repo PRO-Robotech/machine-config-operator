@@ -86,14 +86,6 @@ var (
 		},
 		[]string{"pool"},
 	)
-
-	drainSelfSkippedTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "mco_drain_self_skipped_total",
-			Help: "Number of times drain was skipped for controller's own node",
-		},
-		[]string{"pool"},
-	)
 )
 
 func init() {
@@ -106,7 +98,6 @@ func init() {
 		drainStuckTotal,
 		cordonedNodes,
 		drainingNodes,
-		drainSelfSkippedTotal,
 	)
 }
 
@@ -165,9 +156,4 @@ func UpdateCordonedNodesGauge(pool string, count int) {
 
 func UpdateDrainingNodesGauge(pool string, count int) {
 	drainingNodes.WithLabelValues(pool).Set(float64(count))
-}
-
-// RecordDrainSelfSkipped increments the counter when self-node drain is skipped.
-func RecordDrainSelfSkipped(pool string) {
-	drainSelfSkippedTotal.WithLabelValues(pool).Inc()
 }

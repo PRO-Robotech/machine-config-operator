@@ -43,7 +43,6 @@ func ProcessNodeUpdate(
 	targetRevision string,
 	drainTimeoutSeconds int,
 	drainRetrySeconds int,
-	selfNodeName string,
 	events *EventRecorder,
 ) NodeUpdateResult {
 	logger := log.FromContext(ctx)

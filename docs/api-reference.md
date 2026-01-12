@@ -266,7 +266,6 @@ status:
 | `NodeDrain` | Warning | Drain started (destructive) |
 | `DrainFailed` | Warning | Drain attempt failed, will retry |
 | `NodeUncordoned` | Normal | Node returned to service |
-| `SelfNodeDrainSkipped` | Normal | Controller skipped drain of own node |
 | `ApplyStarted` | Normal | Config apply started |
 | `ApplyComplete` | Normal | Config applied successfully |
 | `ApplyFailed` | Warning | Config apply failed |

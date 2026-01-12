@@ -33,11 +33,6 @@
   - Поды из namespace `machine-config-system` исключены из eviction
   - Решает проблему deadlock когда контроллер убивает сам себя
 
-- **Controller не drain'ит свою ноду** — контроллер пропускает drain для ноды, на которой работает
-  - Добавлена переменная окружения `NODE_NAME` через Downward API
-  - Эмитится событие `SelfNodeDrainSkipped` для мониторинга
-  - Метрика `mco_drain_self_skipped_total` для observability
-
 - **Нода остаётся cordoned после reboot** — исправлена логика uncordon после перезагрузки
   - Agent корректно устанавливает состояние `done` после startup
   - Нода uncordon в течение 30 секунд после перезагрузки
@@ -70,7 +65,6 @@
 - Конфигурируемый `drainRetrySeconds` для интервала retry drain
 - `lastSuccessfulRevision` в статусе пула
 - `desiredRevisionSetAt` аннотация для timeout detection
-- Метрика `mco_drain_self_skipped_total` для мониторинга пропуска self-drain
 
 ### Документация
 
@@ -310,7 +304,6 @@ spec:
 | `NodeCordon` | CHANGED | Now Warning type (was Normal) |
 | `NodeDrain` | CHANGED | Now Warning type (was Normal) |
 | `DrainFailed` | ADDED | Warning on drain failures |
-| `SelfNodeDrainSkipped` | ADDED | Info when controller skips own node |
 
 ### v0.1.0 → v0.1.1
 

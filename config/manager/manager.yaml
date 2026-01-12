@@ -89,12 +89,8 @@ spec:
         image: controller:latest
         imagePullPolicy: Never
         name: manager
-        # Downward API for self-awareness (skip drain for own node)
+        # Downward API for controller pod identification
         env:
-        - name: NODE_NAME
-          valueFrom:
-            fieldRef:
-              fieldPath: spec.nodeName
         - name: POD_NAME
           valueFrom:
             fieldRef:

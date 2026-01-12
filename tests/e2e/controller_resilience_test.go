@@ -131,19 +131,6 @@ spec:
 				"controller should tolerate unschedulable taint to continue running on cordoned nodes")
 		})
 
-		It("should have NODE_NAME environment variable for self-awareness", func() {
-			By("retrieving controller container environment variables")
-			cmd := exec.Command("kubectl", "get", "pod", "-n", namespace,
-				"-l", "control-plane=controller-manager",
-				"-o", "jsonpath={.items[0].spec.containers[0].env[*].name}")
-			output, err := testutil.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-
-			envVars := string(output)
-			Expect(envVars).To(ContainSubstring("NODE_NAME"),
-				"controller should have NODE_NAME environment variable to identify its host node")
-		})
-
 		It("should have POD_NAME environment variable", func() {
 			By("retrieving controller container environment variables")
 			cmd := exec.Command("kubectl", "get", "pod", "-n", namespace,

@@ -102,15 +102,10 @@ selectedNodes = first(canUpdate, needsUpdate)
 **Задача:** Безопасно подготовить ноду к обновлению.
 
 **Последовательность:**
-1. **Проверка self-node** — если это нода Controller'а, пропустить cordon/drain
-2. **Cordon** — пометить ноду как `unschedulable`, записать аннотацию `mco.in-cloud.io/cordoned=true`
-3. **Drain** — эвакуировать поды с учётом PodDisruptionBudget
-4. При ошибке drain — повторять с backoff, эмитить событие `DrainFailed`
-5. Если drain занимает слишком долго — установить condition `DrainStuck`
-
-**Self-node protection:**
-Controller определяет свою ноду через переменную окружения `NODE_NAME` (Downward API).
-Для self-node конфигурация применяется без cordon/drain, чтобы избежать deadlock.
+1. **Cordon** — пометить ноду как `unschedulable`, записать аннотацию `mco.in-cloud.io/cordoned=true`
+2. **Drain** — эвакуировать поды с учётом PodDisruptionBudget
+3. При ошибке drain — повторять с backoff, эмитить событие `DrainFailed`
+4. Если drain занимает слишком долго — установить condition `DrainStuck`
 
 **Drain параметры:**
 - `drainTimeoutSeconds` — максимальное время ожидания (default: 3600s)

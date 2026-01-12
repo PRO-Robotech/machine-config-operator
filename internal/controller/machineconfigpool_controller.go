@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -49,22 +48,17 @@ type MachineConfigPoolReconciler struct {
 	annotator *NodeAnnotator
 	cleaner   *RMCCleaner
 	events    *EventRecorder
-
-	// selfNodeName is the node where this controller runs.
-	// Used to skip self-node drain and prevent controller disruption.
-	selfNodeName string
 }
 
 // NewMachineConfigPoolReconciler creates a new reconciler with all components.
 func NewMachineConfigPoolReconciler(c client.Client, scheme *runtime.Scheme) *MachineConfigPoolReconciler {
 	return &MachineConfigPoolReconciler{
-		Client:       c,
-		Scheme:       scheme,
-		debounce:     NewDebounceState(),
-		annotator:    NewNodeAnnotator(c),
-		cleaner:      NewRMCCleaner(c),
-		events:       &EventRecorder{}, // nil-safe: methods check for nil recorder
-		selfNodeName: os.Getenv("NODE_NAME"),
+		Client:    c,
+		Scheme:    scheme,
+		debounce:  NewDebounceState(),
+		annotator: NewNodeAnnotator(c),
+		cleaner:   NewRMCCleaner(c),
+		events:    &EventRecorder{}, // nil-safe: methods check for nil recorder
 	}
 }
 
@@ -278,27 +272,7 @@ func (r *MachineConfigPoolReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	for i := range nodesToProcess {
 		node := &nodesToProcess[i]
 
-		// Skip cordon/drain for the controller's own node to prevent self-disruption.
-		// Set desired-revision directly and let agent apply config without drain.
-		if r.isSelfNode(node) {
-			log.Info("skipping drain for self node",
-				"node", node.Name,
-				"reason", "controller runs on this node")
-
-			// Record metric
-			RecordDrainSelfSkipped(pool.Name)
-
-			// Record event
-			r.events.SelfNodeDrainSkipped(pool, node.Name)
-
-			// Set desired-revision directly (skip cordon/drain)
-			if err := r.annotator.SetDesiredRevision(ctx, node.Name, rmc.Name, pool.Name); err != nil {
-				log.Error(err, "failed to set desired revision for self node", "node", node.Name)
-			}
-			continue
-		}
-
-		result := ProcessNodeUpdate(ctx, r.Client, pool, node, rmc.Name, drainTimeoutSeconds, drainRetrySeconds, r.selfNodeName, r.events)
+		result := ProcessNodeUpdate(ctx, r.Client, pool, node, rmc.Name, drainTimeoutSeconds, drainRetrySeconds, r.events)
 
 		// Emit lifecycle events based on result flags
 		if result.Cordoned {
@@ -584,12 +558,6 @@ func (r *MachineConfigPoolReconciler) mapNodeToPool(ctx context.Context, obj cli
 	}
 
 	return requests
-}
-
-// isSelfNode checks if the given node is where the controller is running.
-// Used to skip drain for the controller's own node and prevent self-disruption.
-func (r *MachineConfigPoolReconciler) isSelfNode(node *corev1.Node) bool {
-	return r.selfNodeName != "" && node.Name == r.selfNodeName
 }
 
 // hasPoolOverlapCondition checks if the pool has a PoolOverlap condition set to True.

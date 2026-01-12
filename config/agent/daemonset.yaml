@@ -23,8 +23,8 @@ spec:
         - name: agent
           # NOTE: kustomize replaces this image name via config/agent/kustomization.yaml
           # (e.g. agent=mco-agent:e2e for E2E tests).
-          image: agent:latest
-          imagePullPolicy: Never
+          image: prorobotech/machine-config-agent:COUD-402_mcr-c8f111f2
+          imagePullPolicy: IfNotPresent
           args:
             - --host-root=/host
             - --skip-systemd  # For environments without systemd (e.g., minikube)
@@ -44,9 +44,9 @@ spec:
             - name: state
               mountPath: /var/lib/mco
           resources:
-            limits:
-              cpu: 200m
-              memory: 128Mi
+            # limits:
+            #   cpu: 200m
+            #   memory: 128Mi
             requests:
               cpu: 50m
               memory: 64Mi

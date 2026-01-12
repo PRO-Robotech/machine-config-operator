@@ -198,10 +198,12 @@ const (
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Cluster,shortName=mcp
 // +kubebuilder:subresource:status
-// +kubebuilder:printcolumn:name="Target",type=string,JSONPath=`.status.targetRevision`
 // +kubebuilder:printcolumn:name="Current",type=string,JSONPath=`.status.currentRevision`
-// +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readyMachineCount`
+// +kubebuilder:printcolumn:name="Target",type=string,JSONPath=`.status.targetRevision`
+// +kubebuilder:printcolumn:name="Nodes",type=string,JSONPath=`.status.machineCount`
+// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.readyMachineCount`
 // +kubebuilder:printcolumn:name="Updated",type=integer,JSONPath=`.status.updatedMachineCount`
+// +kubebuilder:printcolumn:name="Unavailable",type=integer,JSONPath=`.status.unavailableMachineCount`
 // +kubebuilder:printcolumn:name="Degraded",type=integer,JSONPath=`.status.degradedMachineCount`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 

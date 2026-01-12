@@ -77,8 +77,8 @@ spec:
           - --health-probe-bind-address=:8081
         # NOTE: kustomize replaces this image name via config/manager/kustomization.yaml
         # (e.g. controller=mco-controller:e2e for E2E tests).
-        image: controller:latest
-        imagePullPolicy: Never
+        image: prorobotech/machine-config-operator:COUD-402_mcr-c8f111f2
+        imagePullPolicy: IfNotPresent
         name: manager
         ports: []
         securityContext:
@@ -103,7 +103,7 @@ spec:
         # More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
         resources:
           limits:
-            cpu: 500m
+            cpu: 100m
             memory: 128Mi
           requests:
             cpu: 10m

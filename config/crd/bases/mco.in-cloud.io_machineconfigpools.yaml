@@ -17,17 +17,23 @@ spec:
   scope: Cluster
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .status.targetRevision
-      name: Target
-      type: string
     - jsonPath: .status.currentRevision
       name: Current
       type: string
+    - jsonPath: .status.targetRevision
+      name: Target
+      type: string
+    - jsonPath: .status.machineCount
+      name: Nodes
+      type: string
     - jsonPath: .status.readyMachineCount
       name: Ready
-      type: integer
+      type: string
     - jsonPath: .status.updatedMachineCount
       name: Updated
+      type: integer
+    - jsonPath: .status.unavailableMachineCount
+      name: Unavailable
       type: integer
     - jsonPath: .status.degradedMachineCount
       name: Degraded

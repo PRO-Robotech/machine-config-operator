@@ -427,6 +427,71 @@ func TestMergeConditions_NewCondition(t *testing.T) {
 	}
 }
 
+// TestMergeConditions_PreservesUnhandledConditions verifies that conditions in existing
+// but not in new are preserved. This is critical for PoolOverlap and DrainStuck which
+// are managed separately by ApplyOverlapCondition and Set/ClearDrainStuckCondition.
+func TestMergeConditions_PreservesUnhandledConditions(t *testing.T) {
+	oldTime := metav1.NewTime(time.Now().Add(-1 * time.Hour))
+	newTime := metav1.Now()
+
+	// Existing has PoolOverlap and DrainStuck (managed separately)
+	existing := []metav1.Condition{
+		{Type: mcov1alpha1.ConditionReady, Status: metav1.ConditionTrue, LastTransitionTime: oldTime},
+		{Type: mcov1alpha1.ConditionPoolOverlap, Status: metav1.ConditionFalse, Reason: "NoOverlap", LastTransitionTime: oldTime},
+		{Type: mcov1alpha1.ConditionDrainStuck, Status: metav1.ConditionFalse, Reason: "DrainComplete", LastTransitionTime: oldTime},
+	}
+
+	// New only has Ready (computeConditions doesn't include PoolOverlap/DrainStuck)
+	new := []metav1.Condition{
+		{Type: mcov1alpha1.ConditionReady, Status: metav1.ConditionTrue, LastTransitionTime: newTime},
+	}
+
+	result := mergeConditions(existing, new)
+
+	// Should have all 3 conditions: Ready (from new) + PoolOverlap + DrainStuck (preserved)
+	if len(result) != 3 {
+		t.Fatalf("len(result) = %d, want 3 (Ready + PoolOverlap + DrainStuck)", len(result))
+	}
+
+	// Check Ready is from new (with preserved timestamp since status unchanged)
+	var foundReady, foundOverlap, foundDrainStuck bool
+	for _, c := range result {
+		switch c.Type {
+		case mcov1alpha1.ConditionReady:
+			foundReady = true
+			if c.LastTransitionTime != oldTime {
+				t.Error("Ready condition should preserve old LastTransitionTime (status unchanged)")
+			}
+		case mcov1alpha1.ConditionPoolOverlap:
+			foundOverlap = true
+			if c.LastTransitionTime != oldTime {
+				t.Error("PoolOverlap condition should be preserved with original timestamp")
+			}
+			if c.Reason != "NoOverlap" {
+				t.Errorf("PoolOverlap Reason = %s, want NoOverlap", c.Reason)
+			}
+		case mcov1alpha1.ConditionDrainStuck:
+			foundDrainStuck = true
+			if c.LastTransitionTime != oldTime {
+				t.Error("DrainStuck condition should be preserved with original timestamp")
+			}
+			if c.Reason != "DrainComplete" {
+				t.Errorf("DrainStuck Reason = %s, want DrainComplete", c.Reason)
+			}
+		}
+	}
+
+	if !foundReady {
+		t.Error("Ready condition not found in result")
+	}
+	if !foundOverlap {
+		t.Error("PoolOverlap condition not found in result - should be preserved")
+	}
+	if !foundDrainStuck {
+		t.Error("DrainStuck condition not found in result - should be preserved")
+	}
+}
+
 // TestComputeOverlapCondition_NoConflicts verifies condition when no overlap.
 func TestComputeOverlapCondition_NoConflicts(t *testing.T) {
 	overlap := NewOverlapResult()

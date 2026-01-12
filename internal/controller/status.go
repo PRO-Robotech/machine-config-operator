@@ -308,14 +308,22 @@ func mergeConditions(existing, new []metav1.Condition) []metav1.Condition {
 		existingMap[c.Type] = c
 	}
 
-	result := make([]metav1.Condition, 0, len(new))
+	newTypes := make(map[string]struct{})
+	result := make([]metav1.Condition, 0, len(new)+2)
 	for _, newCondition := range new {
+		newTypes[newCondition.Type] = struct{}{}
 		if existingCondition, ok := existingMap[newCondition.Type]; ok {
 			if existingCondition.Status == newCondition.Status {
 				newCondition.LastTransitionTime = existingCondition.LastTransitionTime
 			}
 		}
 		result = append(result, newCondition)
+	}
+
+	for _, c := range existing {
+		if _, inNew := newTypes[c.Type]; !inNew {
+			result = append(result, c)
+		}
 	}
 
 	return result

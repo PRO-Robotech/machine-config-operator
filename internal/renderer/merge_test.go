@@ -725,3 +725,65 @@ func TestMerge_ComplexScenario(t *testing.T) {
 		}
 	}
 }
+
+// TestMerge_TieBreaker_LargerNameWins documents OpenShift-compatible behavior:
+// At equal priority, larger name wins (later in sorted order overwrites).
+// This is consistent with OpenShift MCO where alphanumerically larger names
+// take precedence (e.g., 99-custom > 00-base, 50-beta > 50-alpha).
+func TestMerge_TieBreaker_LargerNameWins(t *testing.T) {
+	// Create two configs with SAME priority but different names
+	mcAlpha := newMachineConfig("50-alpha", 50)
+	mcAlpha.Spec.Files = []mcov1alpha1.FileSpec{
+		{Path: "/etc/test.conf", Content: "alpha content"},
+	}
+
+	mcBeta := newMachineConfig("50-beta", 50)
+	mcBeta.Spec.Files = []mcov1alpha1.FileSpec{
+		{Path: "/etc/test.conf", Content: "beta content"},
+	}
+
+	// Pass in arbitrary order - merge should sort and apply consistently
+	result := Merge([]*mcov1alpha1.MachineConfig{mcBeta, mcAlpha})
+
+	// Verify 50-beta wins (larger name)
+	if len(result.Files) != 1 {
+		t.Fatalf("Files count = %d, want 1", len(result.Files))
+	}
+	if result.Files[0].Content != "beta content" {
+		t.Errorf("File content = %q, want 'beta content' (larger name 50-beta should win)", result.Files[0].Content)
+	}
+
+	// Also verify the order in sources: alpha before beta (sorted by name ASC)
+	if len(result.Sources) != 2 {
+		t.Fatalf("Sources count = %d, want 2", len(result.Sources))
+	}
+	if result.Sources[0].Name != "50-alpha" || result.Sources[1].Name != "50-beta" {
+		t.Errorf("Sources order = %v, want [50-alpha, 50-beta]", result.Sources)
+	}
+}
+
+// TestMerge_TieBreaker_NamingConvention verifies the common naming convention
+// where configs are named <priority>-<name> and higher numbers override lower.
+func TestMerge_TieBreaker_NamingConvention(t *testing.T) {
+	// Simulate common naming: 00-base, 50-role, 99-override
+	// All have explicit priority=50 but names imply precedence
+	mcBase := newMachineConfig("00-base", 50)
+	mcBase.Spec.Files = []mcov1alpha1.FileSpec{
+		{Path: "/etc/config", Content: "base"},
+	}
+
+	mcOverride := newMachineConfig("99-override", 50)
+	mcOverride.Spec.Files = []mcov1alpha1.FileSpec{
+		{Path: "/etc/config", Content: "override"},
+	}
+
+	result := Merge([]*mcov1alpha1.MachineConfig{mcOverride, mcBase})
+
+	// 99-override should win (larger name)
+	if len(result.Files) != 1 {
+		t.Fatalf("Files count = %d, want 1", len(result.Files))
+	}
+	if result.Files[0].Content != "override" {
+		t.Errorf("File content = %q, want 'override' (99-override should win over 00-base)", result.Files[0].Content)
+	}
+}

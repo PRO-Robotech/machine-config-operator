@@ -82,7 +82,7 @@ func (s *StateManager) WriteLastRebootTime(t time.Time) error {
 	}
 
 	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath) // Clean up on error
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("failed to rename last reboot file: %w", err)
 	}
 

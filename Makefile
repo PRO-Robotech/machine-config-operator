@@ -81,17 +81,60 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 			echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation." ;; \
 		*) \
 			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
-			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
+			$(KIND) create cluster --name $(KIND_CLUSTER) --config tests/e2e/kind-config.yaml ;; \
 	esac
+
+.PHONY: test-envtest
+test-envtest: manifests generate setup-envtest ## Run EnvTest tests (controller tests with real API server).
+	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" \
+		go test -tags=envtest ./tests/envtest/... -v -ginkgo.v
+
+.PHONY: test-unit
+test-unit: ## Run unit tests with mocks (isolated tests).
+	go test -tags=unit ./tests/agent/... -v
 
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -timeout 30m -tags=e2e ./tests/e2e/ -v -ginkgo.v
 	$(MAKE) cleanup-test-e2e
+
+.PHONY: test-e2e-focus
+test-e2e-focus: setup-test-e2e manifests generate fmt vet ## Run a focused subset of e2e tests. Usage: make test-e2e-focus FOCUS='Node Invariants|File Apply' [SKIP_CLEANUP=true]
+	@if [ -z "$(FOCUS)" ]; then \
+		echo "Error: FOCUS is required. Example:"; \
+		echo "  make test-e2e-focus FOCUS='Node Invariants|File Apply'"; \
+		exit 1; \
+	fi
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -timeout 30m -tags=e2e ./tests/e2e/ -v -ginkgo.v -ginkgo.focus="$(FOCUS)"
+	@if [ "$(SKIP_CLEANUP)" != "true" ]; then $(MAKE) cleanup-test-e2e; fi
 
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
+
+##@ E2E Docker Images
+
+# E2E specific image names - used for building/loading to Kind
+E2E_CONTROLLER_IMG ?= mco-controller:e2e
+E2E_AGENT_IMG ?= mco-agent:e2e
+
+.PHONY: docker-build-e2e
+docker-build-e2e: ## Build docker images for E2E tests (controller + agent)
+	$(MAKE) docker-build-controller CONTROLLER_IMG=$(E2E_CONTROLLER_IMG)
+	$(MAKE) docker-build-agent AGENT_IMG=$(E2E_AGENT_IMG)
+
+.PHONY: kind-load-e2e
+kind-load-e2e: docker-build-e2e ## Load E2E images to Kind cluster
+	$(KIND) load docker-image $(E2E_CONTROLLER_IMG) --name $(KIND_CLUSTER)
+	$(KIND) load docker-image $(E2E_AGENT_IMG) --name $(KIND_CLUSTER)
+
+.PHONY: deploy-e2e
+deploy-e2e: manifests kustomize ## Deploy controller and agent for E2E tests
+	$(KUSTOMIZE) build config/e2e | $(KUBECTL) apply -f -
+
+.PHONY: undeploy-e2e
+undeploy-e2e: kustomize ## Undeploy controller and agent for E2E tests
+	$(KUSTOMIZE) build config/e2e | $(KUBECTL) delete --ignore-not-found -f -
 
 ##@ Scenario Tests (Minikube)
 
@@ -103,23 +146,52 @@ test-scenario: ## Run a single scenario test. Usage: make test-scenario SCENARIO
 		echo "Error: SCENARIO is required. Usage: make test-scenario SCENARIO=001-sysctl-basic"; \
 		echo ""; \
 		echo "Available scenarios:"; \
-		ls -d test/scenarios/[0-9][0-9][0-9]-*/ 2>/dev/null | xargs -I{} basename {} | sed 's/^/  /'; \
+		ls -d tests/scenarios/[0-9][0-9][0-9]-*/ 2>/dev/null | xargs -I{} basename {} | sed 's/^/  /'; \
 		exit 1; \
 	fi
-	./test/scenarios/run-scenario.sh $(SCENARIO)
+	./tests/scenarios/run-scenario.sh $(SCENARIO)
 
 .PHONY: test-scenarios
 test-scenarios: ## Run all scenario tests in minikube
-	./test/scenarios/run-all.sh
+	./tests/scenarios/run-all.sh
 
 .PHONY: list-scenarios
 list-scenarios: ## List available test scenarios
 	@echo "Available scenarios:"
-	@ls -d test/scenarios/[0-9][0-9][0-9]-*/ 2>/dev/null | xargs -I{} basename {} | sed 's/^/  /'
+	@ls -d tests/scenarios/[0-9][0-9][0-9]-*/ 2>/dev/null | xargs -I{} basename {} | sed 's/^/  /'
 
 .PHONY: cleanup-scenarios
 cleanup-scenarios: ## Cleanup all test scenarios
-	./test/scenarios/run-all.sh --cleanup-all
+	./tests/scenarios/run-all.sh --cleanup-all
+
+##@ Mocks
+
+MOCKGEN ?= $(LOCALBIN)/mockgen
+MOCKGEN_VERSION ?= v0.6.0
+
+.PHONY: mockgen
+mockgen: $(MOCKGEN) ## Download mockgen locally if necessary.
+$(MOCKGEN): $(LOCALBIN)
+	$(call go-install-tool,$(MOCKGEN),go.uber.org/mock/mockgen,$(MOCKGEN_VERSION))
+
+.PHONY: generate-mocks
+generate-mocks: mockgen ## Generate mocks from production interfaces.
+	@echo "Generating mocks from production code..."
+	@mkdir -p tests/mocks
+	$(MOCKGEN) -source=internal/agent/files.go \
+		-destination=tests/mocks/mock_files.go -package=mocks
+	$(MOCKGEN) -source=internal/agent/systemd.go \
+		-destination=tests/mocks/mock_systemd.go -package=mocks
+	$(MOCKGEN) -source=internal/agent/reboot_decision.go \
+		-destination=tests/mocks/mock_rmc_fetcher.go -package=mocks
+	$(MOCKGEN) -source=internal/agent/reboot/handler.go \
+		-destination=tests/mocks/mock_reboot.go -package=mocks
+	@echo "Mocks generated in tests/mocks/"
+
+.PHONY: verify-mocks
+verify-mocks: generate-mocks ## Verify mocks are up to date.
+	@git diff --exit-code tests/mocks/ || \
+		(echo "Mocks are out of date. Run 'make generate-mocks'" && exit 1)
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
@@ -221,6 +293,7 @@ uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified 
 .PHONY: deploy
 deploy: manifests kustomize ## Deploy controller and agent to the K8s cluster specified in ~/.kube/config.
 	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${CONTROLLER_IMG}
+	cd config/agent && "$(KUSTOMIZE)" edit set image agent=${AGENT_IMG}
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" apply -f -
 
 .PHONY: undeploy
@@ -240,7 +313,7 @@ KIND ?= kind
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
-GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
+GOLANGCI_LINT ?= $(shell command -v golangci-lint 2>/dev/null || echo "$(LOCALBIN)/golangci-lint")
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.7.1
@@ -281,9 +354,12 @@ $(ENVTEST): $(LOCALBIN)
 	$(call go-install-tool,$(ENVTEST),sigs.k8s.io/controller-runtime/tools/setup-envtest,$(ENVTEST_VERSION))
 
 .PHONY: golangci-lint
-golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
-$(GOLANGCI_LINT): $(LOCALBIN)
-	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
+golangci-lint: ## Download golangci-lint locally if necessary (skipped if found in PATH).
+	@if ! command -v golangci-lint >/dev/null 2>&1; then \
+		$(MAKE) $(LOCALBIN)/golangci-lint; \
+	fi
+$(LOCALBIN)/golangci-lint: $(LOCALBIN)
+	$(call go-install-tool,$(LOCALBIN)/golangci-lint,github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary

@@ -10,14 +10,16 @@
 
 ```
 MachineConfigPool (status)
-├── conditions: Updated, Updating, Degraded, RenderDegraded
-├── counters: machineCount, readyMachineCount, ...
-└── revisions: targetRevision, currentRevision
+├── conditions: Ready, Updating, Draining, Degraded, PoolOverlap, DrainStuck
+├── counters: machineCount, readyMachineCount, cordonedMachineCount, ...
+└── revisions: targetRevision, currentRevision, lastSuccessfulRevision
     │
     └── Nodes (annotations)
         ├── mco.in-cloud.io/agent-state
         ├── mco.in-cloud.io/current-revision
         ├── mco.in-cloud.io/desired-revision
+        ├── mco.in-cloud.io/cordoned
+        ├── mco.in-cloud.io/drain-started-at
         └── mco.in-cloud.io/reboot-pending
 ```
 
@@ -44,18 +46,20 @@ status:
   updatedMachineCount: 5    # Обновлены (current=target)
   updatingMachineCount: 0   # Обновляются (state=applying)
   degradedMachineCount: 0   # С ошибкой (state=error)
-  unavailableMachineCount: 0  # Недоступны
+  cordonedMachineCount: 0   # Cordoned для обновления
+  drainingMachineCount: 0   # В процессе drain
   pendingRebootCount: 0     # Ждут перезагрузки
 ```
 
 ### Интерпретация счётчиков
 
-| Сценарий | machineCount | ready | updated | updating | degraded |
-|----------|--------------|-------|---------|----------|----------|
-| Всё хорошо | 5 | 5 | 5 | 0 | 0 |
-| Раскатка | 5 | 2 | 2 | 3 | 0 |
-| Частичный сбой | 5 | 3 | 3 | 0 | 2 |
-| Полный сбой | 5 | 0 | 0 | 0 | 5 |
+| Сценарий | machineCount | ready | updated | updating | cordoned | degraded |
+|----------|--------------|-------|---------|----------|----------|----------|
+| Всё хорошо | 5 | 5 | 5 | 0 | 0 | 0 |
+| Раскатка | 5 | 2 | 2 | 1 | 1 | 0 |
+| Drain блокирован | 5 | 2 | 2 | 0 | 1 | 0 |
+| Частичный сбой | 5 | 3 | 3 | 0 | 0 | 2 |
+| Полный сбой | 5 | 0 | 0 | 0 | 0 | 5 |
 
 ---
 
@@ -65,61 +69,92 @@ status:
 kubectl get mcp worker -o jsonpath='{.status.conditions}' | jq .
 ```
 
-### Updated
+### Ready — главный индикатор здоровья
 
 ```yaml
-- type: Updated
-  status: "True"      # Все ноды на target revision
+- type: Ready
+  status: "True"      # Всё хорошо
   reason: AllNodesUpdated
-  message: "All 5 nodes are updated"
+  message: "All 5 nodes are at target revision"
 ```
 
-| status | Значение |
-|--------|----------|
-| True | Все ноды имеют target revision |
-| False | Есть ноды с другой revision |
+| status | reason | Значение |
+|--------|--------|----------|
+| True | AllNodesUpdated | Все ноды обновлены и нет ошибок |
+| False | RolloutInProgress | Идёт обновление |
+| False | Degraded | Есть ноды с ошибками |
+| False | NoMachineConfigs | Нет конфигов в пуле |
 
 ### Updating
 
 ```yaml
 - type: Updating
   status: "True"      # Идёт раскатка
-  reason: NodesUpdating
-  message: "3 of 5 nodes are applying configuration"
+  reason: RolloutInProgress
+  message: "Updating 3 nodes"
 ```
 
 | status | Значение |
 |--------|----------|
-| True | Хотя бы одна нода в состоянии `applying` |
-| False | Нет нод в состоянии `applying` |
+| True | Есть ноды не на target revision |
+| False | Все ноды на target revision |
+
+### Draining
+
+```yaml
+- type: Draining
+  status: "True"      # Drain в процессе
+  reason: NodesDraining
+  message: "2 nodes are currently draining"
+```
+
+| status | Значение |
+|--------|----------|
+| True | На нодах выполняется drain |
+| False | Нет активного drain |
 
 ### Degraded
 
 ```yaml
 - type: Degraded
   status: "True"      # Есть проблемы
-  reason: NodesDegraded
-  message: "2 nodes are in error state"
+  reason: NodeErrors
+  message: "2 nodes in error state"
 ```
 
-| status | Значение |
-|--------|----------|
-| True | Хотя бы одна нода в состоянии `error` |
-| False | Нет нод в состоянии `error` |
+| status | reason | Значение |
+|--------|--------|----------|
+| True | NodeErrors | Ноды в состоянии error |
+| True | RenderFailed | Ошибка создания RenderedMachineConfig |
+| False | NoErrors | Нет ошибок |
 
-### RenderDegraded
+### PoolOverlap
 
 ```yaml
-- type: RenderDegraded
-  status: "True"      # Ошибка рендеринга
-  reason: RenderFailed
-  message: "Failed to render: invalid file path"
+- type: PoolOverlap
+  status: "True"      # Нода в нескольких пулах
+  reason: NodeMatchesMultiplePools
+  message: "Node node-1 matches pools: worker, infra"
 ```
 
 | status | Значение |
 |--------|----------|
-| True | Ошибка при создании RenderedMachineConfig |
-| False | Рендеринг работает нормально |
+| True | Обнаружена нода, матчащая несколько пулов |
+| False | Нет overlap |
+
+### DrainStuck
+
+```yaml
+- type: DrainStuck
+  status: "True"      # Drain timeout
+  reason: DrainTimeout
+  message: "Node node-1 drain exceeded 3600s timeout"
+```
+
+| status | Значение |
+|--------|----------|
+| True | Drain занимает больше drainTimeoutSeconds |
+| False | Drain в норме |
 
 ---
 
@@ -137,7 +172,9 @@ kubectl get node NODE -o jsonpath='{.metadata.annotations}' | jq 'with_entries(s
   "mco.in-cloud.io/desired-revision": "rendered-worker-a1b2c3d4e5",
   "mco.in-cloud.io/current-revision": "rendered-worker-a1b2c3d4e5",
   "mco.in-cloud.io/agent-state": "done",
-  "mco.in-cloud.io/last-error": "",
+  "mco.in-cloud.io/cordoned": "true",
+  "mco.in-cloud.io/drain-started-at": "2026-01-09T10:00:00Z",
+  "mco.in-cloud.io/drain-retry-count": "3",
   "mco.in-cloud.io/reboot-pending": "false"
 }
 ```
@@ -146,9 +183,9 @@ kubectl get node NODE -o jsonpath='{.metadata.annotations}' | jq 'with_entries(s
 
 | Состояние | Описание | Следующее |
 |-----------|----------|-----------|
-| `idle` | Agent ожидает команд | — |
-| `applying` | Применяет конфигурацию | done или error |
-| `done` | Конфигурация применена | idle |
+| `idle` | Agent ожидает команд | → `applying` при новой revision |
+| `applying` | Применяет конфигурацию | → `done` или `error` |
+| `done` | Конфигурация применена | → `idle` после stabilization |
 | `error` | Ошибка применения | (ручное вмешательство) |
 
 ### Переходы состояний
@@ -193,7 +230,11 @@ watch -n 2 'kubectl get mcp'
 
 ```bash
 # Следить за аннотациями
-watch -n 2 'kubectl get nodes -o custom-columns="NAME:.metadata.name,STATE:.metadata.annotations.mco\.in-cloud\.io/agent-state,REV:.metadata.annotations.mco\.in-cloud\.io/current-revision"'
+watch -n 2 'kubectl get nodes -o custom-columns="\
+NAME:.metadata.name,\
+STATE:.metadata.annotations.mco\.in-cloud\.io/agent-state,\
+CORDONED:.metadata.annotations.mco\.in-cloud\.io/cordoned,\
+REV:.metadata.annotations.mco\.in-cloud\.io/current-revision"'
 ```
 
 ### Логи Controller
@@ -226,7 +267,11 @@ kubectl logs -n mco-system -l app=mco-agent --field-selector spec.nodeName=node-
 echo "=== Pools ===" && kubectl get mcp && \
 echo -e "\n=== MachineConfigs ===" && kubectl get mc && \
 echo -e "\n=== RenderedMachineConfigs ===" && kubectl get rmc && \
-echo -e "\n=== Nodes ===" && kubectl get nodes -o custom-columns='NAME:.metadata.name,STATE:.metadata.annotations.mco\.in-cloud\.io/agent-state,REVISION:.metadata.annotations.mco\.in-cloud\.io/current-revision'
+echo -e "\n=== Nodes ===" && kubectl get nodes -o custom-columns='\
+NAME:.metadata.name,\
+STATE:.metadata.annotations.mco\.in-cloud\.io/agent-state,\
+CORDONED:.metadata.annotations.mco\.in-cloud\.io/cordoned,\
+REVISION:.metadata.annotations.mco\.in-cloud\.io/current-revision'
 ```
 
 ### Проблемные ноды
@@ -239,6 +284,12 @@ kubectl get nodes -o json | jq -r '
   [.metadata.name, .metadata.annotations["mco.in-cloud.io/last-error"]] |
   @tsv'
 
+echo -e "\n=== Cordoned Nodes ===" && \
+kubectl get nodes -o json | jq -r '
+  .items[] |
+  select(.metadata.annotations["mco.in-cloud.io/cordoned"] == "true") |
+  .metadata.name'
+
 echo -e "\n=== Pending Reboot ===" && \
 kubectl get nodes -o json | jq -r '
   .items[] |
@@ -248,37 +299,40 @@ kubectl get nodes -o json | jq -r '
 
 ---
 
-## Метрики (будущее)
+## Prometheus Metrics
 
-> **Примечание:** Экспорт метрик планируется в будущих версиях.
+### Gauge метрики
 
-Планируемые метрики:
+| Метрика | Labels | Описание |
+|---------|--------|----------|
+| `mco_cordoned_nodes` | pool | Cordoned ноды по пулам |
+| `mco_draining_nodes` | pool | Ноды в процессе drain |
+| `mco_pool_overlap_nodes_total` | pool | Ноды в overlap конфликте |
+| `mco_pool_overlap_conflicts_total` | — | Всего конфликтующих нод |
 
-```
-# Gauge
-mco_pool_machine_count{pool="worker"} 5
-mco_pool_ready_machine_count{pool="worker"} 5
-mco_pool_degraded_machine_count{pool="worker"} 0
+### Counter метрики
 
-# Counter
-mco_renders_total{pool="worker"} 15
-mco_apply_success_total{node="node-1"} 10
-mco_apply_failure_total{node="node-1"} 2
+| Метрика | Labels | Описание |
+|---------|--------|----------|
+| `mco_pool_reconcile_total` | pool, result | Количество reconcile |
+| `mco_drain_stuck_total` | pool | Количество drain timeout |
 
-# Histogram
-mco_apply_duration_seconds_bucket{le="10"} 5
-```
+### Histogram метрики
+
+| Метрика | Labels | Описание |
+|---------|--------|----------|
+| `mco_pool_reconcile_duration_seconds` | pool | Время reconcile |
+| `mco_drain_duration_seconds` | pool, node | Время drain |
 
 ---
 
-## Алерты (рекомендации)
+## Alerting (рекомендации)
 
 ### Degraded ноды
 
 ```yaml
-# Пример PrometheusRule (будущее)
 - alert: MCONodeDegraded
-  expr: mco_pool_degraded_machine_count > 0
+  expr: increase(mco_pool_reconcile_total{result="error"}[5m]) > 0
   for: 5m
   labels:
     severity: warning
@@ -286,19 +340,47 @@ mco_apply_duration_seconds_bucket{le="10"} 5
     summary: "MCO node is degraded"
 ```
 
+### Drain Stuck
+
+```yaml
+- alert: MCODrainStuck
+  expr: mco_drain_stuck_total > 0
+  for: 5m
+  labels:
+    severity: warning
+  annotations:
+    summary: "MCO drain stuck on pool {{ $labels.pool }}"
+```
+
+### Pool Overlap
+
+```yaml
+- alert: MCOPoolOverlap
+  expr: mco_pool_overlap_conflicts_total > 0
+  for: 1m
+  labels:
+    severity: critical
+  annotations:
+    summary: "Nodes in multiple pools detected"
+```
+
 ### Долгая раскатка
 
 ```yaml
-- alert: MCORolloutStuck
-  expr: mco_pool_updating_machine_count > 0
+- alert: MCORolloutSlow
+  expr: mco_draining_nodes > 0
   for: 30m
   labels:
     severity: warning
+  annotations:
+    summary: "MCO rollout taking too long"
 ```
 
 ---
 
 ## Связанные документы
 
-- [Проверка применения](verification.md) — детальная проверка
+- [Rolling Update](rolling-update.md) — управление раскаткой
+- [Cordon/Drain](cordon-drain.md) — безопасное обновление
 - [Устранение проблем](troubleshooting.md) — диагностика ошибок
+

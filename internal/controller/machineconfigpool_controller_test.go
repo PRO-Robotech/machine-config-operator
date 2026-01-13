@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	mcov1alpha1 "in-cloud.io/machine-config/api/v1alpha1"
+	"in-cloud.io/machine-config/internal/renderer"
 	"in-cloud.io/machine-config/pkg/annotations"
 )
 
@@ -37,8 +39,16 @@ func newReconciler(objs ...client.Object) *MachineConfigPoolReconciler {
 	_ = corev1.AddToScheme(scheme)
 	_ = mcov1alpha1.AddToScheme(scheme)
 
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).
-		WithStatusSubresource(&mcov1alpha1.MachineConfigPool{}).Build()
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(objs...).
+		WithStatusSubresource(&mcov1alpha1.MachineConfigPool{}).
+		// Add pod index for drain operations
+		WithIndex(&corev1.Pod{}, "spec.nodeName", func(obj client.Object) []string {
+			pod := obj.(*corev1.Pod)
+			return []string{pod.Spec.NodeName}
+		}).
+		Build()
 
 	return NewMachineConfigPoolReconciler(c, scheme)
 }
@@ -213,19 +223,43 @@ func TestReconcile_SetsNodeAnnotations(t *testing.T) {
 
 	r := newReconciler(pool, node, mc)
 
+	// First reconcile - debounce (since config changes)
 	r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: client.ObjectKey{Name: "worker"},
 	})
 
-	_, err := r.Reconcile(context.Background(), ctrl.Request{
+	// Second reconcile - node gets cordoned
+	r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: client.ObjectKey{Name: "worker"},
 	})
 
-	if err != nil {
-		t.Fatalf("Reconcile() error = %v", err)
+	// Check node is cordoned
+	updatedNode := &corev1.Node{}
+	if err := r.Get(context.Background(), client.ObjectKey{Name: "worker-1"}, updatedNode); err != nil {
+		t.Fatalf("Failed to get node: %v", err)
 	}
 
-	updatedNode := &corev1.Node{}
+	if !updatedNode.Spec.Unschedulable {
+		t.Error("node should be cordoned (unschedulable)")
+	}
+
+	cordoned := updatedNode.Annotations[annotations.Cordoned]
+	if cordoned != "true" {
+		t.Errorf("cordoned annotation = %q, want %q", cordoned, "true")
+	}
+
+	// Run additional reconciles - drain completes (no pods), desired-revision set
+	// May need multiple reconciles as each step in ProcessNodeUpdate returns with requeue
+	for i := 0; i < 5; i++ {
+		_, err := r.Reconcile(context.Background(), ctrl.Request{
+			NamespacedName: client.ObjectKey{Name: "worker"},
+		})
+		if err != nil {
+			t.Fatalf("Reconcile() error = %v at iteration %d", err, i)
+		}
+	}
+
+	// Check node has desired-revision
 	if err := r.Get(context.Background(), client.ObjectKey{Name: "worker-1"}, updatedNode); err != nil {
 		t.Fatalf("Failed to get node: %v", err)
 	}
@@ -442,5 +476,426 @@ func TestMapNodeToPool_WrongType(t *testing.T) {
 
 	if len(requests) != 0 {
 		t.Errorf("mapNodeToPool() with wrong type returned %d requests, want 0", len(requests))
+	}
+}
+
+func TestListAllPoolNames(t *testing.T) {
+	tests := []struct {
+		name     string
+		pools    []client.Object
+		expected []string
+	}{
+		{
+			name:     "no pools",
+			pools:    nil,
+			expected: []string{},
+		},
+		{
+			name: "single pool",
+			pools: []client.Object{
+				&mcov1alpha1.MachineConfigPool{
+					ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+				},
+			},
+			expected: []string{"worker"},
+		},
+		{
+			name: "multiple pools",
+			pools: []client.Object{
+				&mcov1alpha1.MachineConfigPool{
+					ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+				},
+				&mcov1alpha1.MachineConfigPool{
+					ObjectMeta: metav1.ObjectMeta{Name: "master"},
+				},
+				&mcov1alpha1.MachineConfigPool{
+					ObjectMeta: metav1.ObjectMeta{Name: "infra"},
+				},
+			},
+			expected: []string{"worker", "master", "infra"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newReconciler(tt.pools...)
+
+			names, err := r.listAllPoolNames(context.Background())
+			if err != nil {
+				t.Fatalf("listAllPoolNames() error = %v", err)
+			}
+
+			if len(names) != len(tt.expected) {
+				t.Errorf("listAllPoolNames() returned %d names, want %d", len(names), len(tt.expected))
+				return
+			}
+
+			// Check all expected names are present (order may vary)
+			nameSet := make(map[string]bool)
+			for _, n := range names {
+				nameSet[n] = true
+			}
+			for _, exp := range tt.expected {
+				if !nameSet[exp] {
+					t.Errorf("listAllPoolNames() missing expected pool %q", exp)
+				}
+			}
+		})
+	}
+}
+
+// TestEnsureRMC_HashCollision_UsesSuffix tests that hash collision triggers suffix retry loop.
+func TestEnsureRMC_HashCollision_UsesSuffix(t *testing.T) {
+	pool := &mcov1alpha1.MachineConfigPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+		Spec: mcov1alpha1.MachineConfigPoolSpec{
+			MachineConfigSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"mco.in-cloud.io/pool": "worker"},
+			},
+		},
+	}
+
+	// Create merged config - will generate a specific hash
+	merged := &renderer.MergedConfig{
+		Files: []mcov1alpha1.FileSpec{{Path: "/etc/new.conf", Content: "new content"}},
+	}
+
+	// Build expected RMC to get the name
+	expectedRMC := renderer.BuildRMC(pool.Name, merged, pool)
+
+	// Create existing RMC with DIFFERENT hash at the same name
+	existingRMC := &mcov1alpha1.RenderedMachineConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: expectedRMC.Name, // Same name that would be generated
+		},
+		Spec: mcov1alpha1.RenderedMachineConfigSpec{
+			PoolName:   pool.Name,
+			Revision:   "old1234567",
+			ConfigHash: "0000000000000000000000000000000000000000000000000000000000000000", // Different hash (64 chars)
+			Config: mcov1alpha1.RenderedConfig{
+				Files: []mcov1alpha1.FileSpec{{Path: "/etc/old.conf", Content: "old"}},
+			},
+		},
+	}
+
+	r := newReconciler(pool, existingRMC)
+
+	// Call ensureRMC - should trigger collision handling
+	rmc, err := r.ensureRMC(context.Background(), pool, merged)
+	if err != nil {
+		t.Fatalf("ensureRMC() error = %v", err)
+	}
+
+	// Verify new RMC was created with suffix
+	if rmc.Name == existingRMC.Name {
+		t.Errorf("RMC name should have suffix, got %q (same as existing)", rmc.Name)
+	}
+
+	// Verify it has the correct suffix format
+	if !strings.HasPrefix(rmc.Name, "worker-") {
+		t.Errorf("RMC name should start with 'worker-', got %q", rmc.Name)
+	}
+
+	// Verify suffix was added
+	if !strings.HasSuffix(rmc.Name, "-1") {
+		t.Errorf("RMC name should end with '-1' suffix, got %q", rmc.Name)
+	}
+}
+
+// TestEnsureRMC_HashCollision_ReusesMatchingSuffix tests that existing suffix with matching hash is reused
+func TestEnsureRMC_HashCollision_ReusesMatchingSuffix(t *testing.T) {
+	pool := &mcov1alpha1.MachineConfigPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+		Spec: mcov1alpha1.MachineConfigPoolSpec{
+			MachineConfigSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"mco.in-cloud.io/pool": "worker"},
+			},
+		},
+	}
+
+	// Merged config
+	merged := &renderer.MergedConfig{
+		Files: []mcov1alpha1.FileSpec{{Path: "/etc/test.conf", Content: "test content"}},
+	}
+
+	// Build RMC to get expected hash
+	expectedRMC := renderer.BuildRMC(pool.Name, merged, pool)
+
+	// Create existing RMC with OLD hash at base name
+	existingBase := &mcov1alpha1.RenderedMachineConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: expectedRMC.Name,
+		},
+		Spec: mcov1alpha1.RenderedMachineConfigSpec{
+			PoolName:   pool.Name,
+			Revision:   "old1234567",
+			ConfigHash: "0000000000000000000000000000000000000000000000000000000000000000",
+			Config: mcov1alpha1.RenderedConfig{
+				Files: []mcov1alpha1.FileSpec{{Path: "/etc/old.conf", Content: "old"}},
+			},
+		},
+	}
+
+	// Create existing RMC with MATCHING hash at suffix-1
+	existingSuffix := &mcov1alpha1.RenderedMachineConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: expectedRMC.Name + "-1",
+		},
+		Spec: mcov1alpha1.RenderedMachineConfigSpec{
+			PoolName:   pool.Name,
+			Revision:   expectedRMC.Spec.Revision,
+			ConfigHash: expectedRMC.Spec.ConfigHash, // Same hash!
+			Config:     expectedRMC.Spec.Config,
+		},
+	}
+
+	r := newReconciler(pool, existingBase, existingSuffix)
+
+	rmc, err := r.ensureRMC(context.Background(), pool, merged)
+	if err != nil {
+		t.Fatalf("ensureRMC() error = %v", err)
+	}
+
+	// Verify existing suffix RMC was reused
+	if rmc.Name != existingSuffix.Name {
+		t.Errorf("RMC name = %q, want %q (should reuse existing with matching hash)", rmc.Name, existingSuffix.Name)
+	}
+}
+
+// TestReconcile_EmptyMachineConfigList_NoRollout verifies that MCP without MachineConfigs
+// does not trigger cordon/drain rollout.
+func TestReconcile_EmptyMachineConfigList_NoRollout(t *testing.T) {
+	pool := &mcov1alpha1.MachineConfigPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+		Spec: mcov1alpha1.MachineConfigPoolSpec{
+			NodeSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"role": "worker"},
+			},
+			Rollout: mcov1alpha1.RolloutConfig{
+				DebounceSeconds: 0, // No debounce for test
+			},
+		},
+	}
+
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "worker-1",
+			Labels: map[string]string{"role": "worker"},
+		},
+	}
+
+	// No MachineConfigs - empty pool
+	r := newReconciler(pool, node)
+
+	// First reconcile
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKey{Name: "worker"},
+	})
+
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	// Should not requeue (no work to do)
+	if result.Requeue {
+		t.Error("Reconcile() should not requeue for empty pool")
+	}
+
+	// Second reconcile to ensure stability
+	result, err = r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKey{Name: "worker"},
+	})
+
+	if err != nil {
+		t.Fatalf("Second Reconcile() error = %v", err)
+	}
+
+	// Verify node is NOT cordoned
+	updatedNode := &corev1.Node{}
+	if err := r.Get(context.Background(), client.ObjectKey{Name: "worker-1"}, updatedNode); err != nil {
+		t.Fatalf("Failed to get node: %v", err)
+	}
+
+	if updatedNode.Spec.Unschedulable {
+		t.Error("node should NOT be cordoned for empty MachineConfig pool")
+	}
+
+	cordoned := updatedNode.Annotations[annotations.Cordoned]
+	if cordoned == "true" {
+		t.Error("node should NOT have cordoned annotation for empty pool")
+	}
+
+	// Verify no RMC was created
+	rmcList := &mcov1alpha1.RenderedMachineConfigList{}
+	if err := r.List(context.Background(), rmcList); err != nil {
+		t.Fatalf("Failed to list RMCs: %v", err)
+	}
+
+	if len(rmcList.Items) != 0 {
+		t.Errorf("RMC count = %d, want 0 for empty pool", len(rmcList.Items))
+	}
+
+	// Verify pool status is updated.
+	updatedPool := &mcov1alpha1.MachineConfigPool{}
+	if err := r.Get(context.Background(), client.ObjectKey{Name: "worker"}, updatedPool); err != nil {
+		t.Fatalf("Failed to get pool: %v", err)
+	}
+
+	if updatedPool.Status.MachineCount != 1 {
+		t.Errorf("MachineCount = %d, want 1", updatedPool.Status.MachineCount)
+	}
+
+	if updatedPool.Status.ReadyMachineCount != 1 {
+		t.Errorf("ReadyMachineCount = %d, want 1", updatedPool.Status.ReadyMachineCount)
+	}
+
+	if updatedPool.Status.TargetRevision != "" {
+		t.Errorf("TargetRevision = %q, want empty for empty pool", updatedPool.Status.TargetRevision)
+	}
+}
+
+// TestReconcile_EmptyToNonEmpty_TriggersRollout verifies that adding MachineConfig
+// to previously empty pool triggers rollout correctly.
+func TestReconcile_EmptyToNonEmpty_TriggersRollout(t *testing.T) {
+	pool := &mcov1alpha1.MachineConfigPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+		Spec: mcov1alpha1.MachineConfigPoolSpec{
+			NodeSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"role": "worker"},
+			},
+			Rollout: mcov1alpha1.RolloutConfig{
+				DebounceSeconds: 0,
+			},
+		},
+	}
+
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "worker-1",
+			Labels: map[string]string{"role": "worker"},
+		},
+	}
+
+	// Start with empty pool
+	r := newReconciler(pool, node)
+
+	// First reconcile - empty pool
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKey{Name: "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	// Verify node is not cordoned (empty pool)
+	updatedNode := &corev1.Node{}
+	if err := r.Get(context.Background(), client.ObjectKey{Name: "worker-1"}, updatedNode); err != nil {
+		t.Fatalf("Failed to get node: %v", err)
+	}
+	if updatedNode.Spec.Unschedulable {
+		t.Error("node should NOT be cordoned for empty pool before adding MC")
+	}
+
+	// Now add a MachineConfig
+	mc := &mcov1alpha1.MachineConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "mc-1"},
+		Spec: mcov1alpha1.MachineConfigSpec{
+			Priority: 50,
+			Files: []mcov1alpha1.FileSpec{
+				{Path: "/etc/test.conf", Content: "test"},
+			},
+		},
+	}
+	if err := r.Create(context.Background(), mc); err != nil {
+		t.Fatalf("Failed to create MC: %v", err)
+	}
+
+	// Reconcile again - should now trigger rollout
+	_, err = r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKey{Name: "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile() after adding MC error = %v", err)
+	}
+
+	// Run a few more reconciles to process the rollout
+	for i := 0; i < 3; i++ {
+		r.Reconcile(context.Background(), ctrl.Request{
+			NamespacedName: client.ObjectKey{Name: "worker"},
+		})
+	}
+
+	// Verify RMC was created
+	rmcList := &mcov1alpha1.RenderedMachineConfigList{}
+	if err := r.List(context.Background(), rmcList); err != nil {
+		t.Fatalf("Failed to list RMCs: %v", err)
+	}
+
+	if len(rmcList.Items) != 1 {
+		t.Errorf("RMC count = %d, want 1 after adding MC", len(rmcList.Items))
+	}
+
+	// Verify node is now cordoned (rollout started)
+	if err := r.Get(context.Background(), client.ObjectKey{Name: "worker-1"}, updatedNode); err != nil {
+		t.Fatalf("Failed to get node: %v", err)
+	}
+
+	if !updatedNode.Spec.Unschedulable {
+		t.Error("node should be cordoned after adding MC to trigger rollout")
+	}
+
+	// Verify pool has TargetRevision set
+	updatedPool := &mcov1alpha1.MachineConfigPool{}
+	if err := r.Get(context.Background(), client.ObjectKey{Name: "worker"}, updatedPool); err != nil {
+		t.Fatalf("Failed to get pool: %v", err)
+	}
+
+	if updatedPool.Status.TargetRevision == "" {
+		t.Error("TargetRevision should be set after adding MC")
+	}
+}
+
+// TestEnsureRMC_NoCollision_ReusesExisting tests that matching hash reuses existing without suffix
+func TestEnsureRMC_NoCollision_ReusesExisting(t *testing.T) {
+	pool := &mcov1alpha1.MachineConfigPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+		Spec: mcov1alpha1.MachineConfigPoolSpec{
+			MachineConfigSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"mco.in-cloud.io/pool": "worker"},
+			},
+		},
+	}
+
+	merged := &renderer.MergedConfig{
+		Files: []mcov1alpha1.FileSpec{{Path: "/etc/test.conf", Content: "test content"}},
+	}
+
+	// Build RMC to get expected hash
+	expectedRMC := renderer.BuildRMC(pool.Name, merged, pool)
+
+	// Create existing RMC with SAME hash
+	existingRMC := &mcov1alpha1.RenderedMachineConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: expectedRMC.Name,
+		},
+		Spec: mcov1alpha1.RenderedMachineConfigSpec{
+			PoolName:   pool.Name,
+			Revision:   expectedRMC.Spec.Revision,
+			ConfigHash: expectedRMC.Spec.ConfigHash, // Same hash!
+			Config:     expectedRMC.Spec.Config,
+			Reboot:     expectedRMC.Spec.Reboot,
+		},
+	}
+
+	r := newReconciler(pool, existingRMC)
+
+	rmc, err := r.ensureRMC(context.Background(), pool, merged)
+	if err != nil {
+		t.Fatalf("ensureRMC() error = %v", err)
+	}
+
+	// Verify existing RMC was reused (no suffix)
+	if rmc.Name != existingRMC.Name {
+		t.Errorf("RMC name = %q, want %q (should reuse existing with matching hash)", rmc.Name, existingRMC.Name)
 	}
 }

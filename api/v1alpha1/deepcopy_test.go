@@ -118,7 +118,7 @@ func TestMachineConfigPoolDeepCopy(t *testing.T) {
 			ReadyMachineCount: 3,
 			Conditions: []metav1.Condition{
 				{
-					Type:   ConditionUpdated,
+					Type:   ConditionReady,
 					Status: metav1.ConditionTrue,
 				},
 			},

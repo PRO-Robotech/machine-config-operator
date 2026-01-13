@@ -10,6 +10,8 @@ MCO Lite позволяет централизованно управлять к
 - Создавать и обновлять файлы на нодах
 - Управлять systemd-сервисами
 - Контролировать перезагрузки нод
+- Выполнять **Rolling Update** с контролируемой скоростью раскатки
+- Автоматически **Cordon/Drain** ноды перед обновлением
 
 Оператор вдохновлён OpenShift Machine Config Operator, но спроектирован проще и работает с любым дистрибутивом Linux.
 
@@ -21,6 +23,7 @@ MCO Lite позволяет централизованно управлять к
 - Устанавливают и настраивают MCO Lite в кластере
 - Создают конфигурации для управления нодами
 - Мониторят состояние применения конфигураций
+- Настраивают rolling update стратегии
 
 ---
 
@@ -32,7 +35,7 @@ MCO Lite позволяет централизованно управлять к
 |----------|----------|
 | [Обзор проекта](concepts/overview.md) | Что такое MCO Lite, ключевые особенности |
 | [Архитектура](concepts/architecture.md) | Компоненты: Controller и Agent |
-| [Терминология](concepts/terminology.md) | Глоссарий терминов и понятий |
+| [Терминология](concepts/glossary.md) | Полный глоссарий терминов и понятий |
 
 ### Начало работы
 
@@ -48,9 +51,17 @@ MCO Lite позволяет централизованно управлять к
 |----------|----------|
 | [MachineConfig](user-guide/machineconfig.md) | Создание конфигураций хоста |
 | [MachineConfigPool](user-guide/machineconfigpool.md) | Группировка нод и конфигов |
-| [Проверка применения](user-guide/verification.md) | Как убедиться что конфиг применился |
-| [Мониторинг статуса](user-guide/status-monitoring.md) | Отслеживание состояния нод |
+| [Rolling Update](user-guide/rolling-update.md) | Управление раскаткой обновлений |
+| [Cordon/Drain](user-guide/cordon-drain.md) | Безопасное обновление с эвакуацией подов |
+| [Мониторинг статуса](user-guide/status-monitoring.md) | Отслеживание состояния нод и пулов |
 | [Устранение проблем](user-guide/troubleshooting.md) | Диагностика ошибок |
+
+### Тестирование
+
+| Документ | Описание |
+|----------|----------|
+| [E2E тесты](testing/e2e-tests.md) | Описание сквозных тестов системы |
+| [Сценарии проверки](testing/verification-scenarios.md) | Как проверить что система работает |
 
 ### Примеры
 
@@ -58,7 +69,7 @@ MCO Lite позволяет централизованно управлять к
 |----------|----------|
 | [Каталог примеров](examples/README.md) | Все примеры с описанием |
 | [Базовые примеры](examples/basic/) | NTP, sysctl, пулы, файлы |
-| [Продвинутые примеры](examples/advanced/) | Мульти-пулы, перезагрузки, приоритеты |
+| [Продвинутые примеры](examples/advanced/) | Мульти-пулы, перезагрузки, rolling update |
 
 ---
 
@@ -80,8 +91,9 @@ kubectl get mcp
 # Проверка статуса нод
 kubectl get nodes -o custom-columns=\
 NAME:.metadata.name,\
-REVISION:.metadata.annotations.mco\\.in-cloud\\.io/current-revision,\
-STATE:.metadata.annotations.mco\\.in-cloud\\.io/agent-state
+REVISION:.metadata.annotations.mco\.in-cloud\.io/current-revision,\
+STATE:.metadata.annotations.mco\.in-cloud\.io/agent-state,\
+CORDONED:.metadata.annotations.mco\.in-cloud\.io/cordoned
 ```
 
 ---
@@ -92,8 +104,3 @@ STATE:.metadata.annotations.mco\\.in-cloud\\.io/agent-state
 
 ---
 
-## Связанные ресурсы
-
-- [Внутренняя документация](../documentation/) — ADR, PRD, Epic/Story для разработчиков
-- [API Reference](../api/v1alpha1/) — Go-типы API
-- [Примеры манифестов](../config/samples/) — Примеры из репозитория

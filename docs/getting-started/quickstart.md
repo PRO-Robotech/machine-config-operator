@@ -1,29 +1,20 @@
 # Быстрый старт
 
-Создайте первую конфигурацию MCO Lite за 5 минут.
+Создайте первую конфигурацию за 5 минут.
 
 ---
 
-## Шаг 1: Проверка установки
+## Предварительные требования
 
-```bash
-# Убедитесь что MCO Lite установлен
-kubectl get crd | grep mco
-# machineconfigs.mco.in-cloud.io
-# machineconfigpools.mco.in-cloud.io
-# renderedmachineconfigs.mco.in-cloud.io
-
-kubectl get pods -n mco-system
-# NAME                              READY   STATUS
-# mco-controller-xxxxx              1/1     Running
-# mco-agent-xxxxx                   1/1     Running
-```
+- Kubernetes кластер с MCO Lite ([установка](installation.md))
+- kubectl с доступом к кластеру
+- Ноды с лейблом `node-role.kubernetes.io/worker`
 
 ---
 
-## Шаг 2: Создание MachineConfigPool
+## Шаг 1: Создать MachineConfigPool
 
-Сначала создадим пул для worker-нод:
+Пул определяет какие ноды и какие конфигурации связаны.
 
 ```bash
 cat <<EOF | kubectl apply -f -
@@ -32,225 +23,222 @@ kind: MachineConfigPool
 metadata:
   name: worker
 spec:
-  # Select nodes with label node-role.kubernetes.io/worker
+  # Какие ноды входят в пул
   nodeSelector:
     matchLabels:
       node-role.kubernetes.io/worker: ""
-  # Select MachineConfigs with label mco.in-cloud.io/pool: worker
+  
+  # Какие MachineConfig применяются
   machineConfigSelector:
     matchLabels:
       mco.in-cloud.io/pool: worker
+  
+  # Настройки раскатки
   rollout:
-    debounceSeconds: 5    # Wait 5 sec before rendering
+    maxUnavailable: 1      # По одной ноде
+    debounceSeconds: 30    # Ждать 30с после изменения
+  
+  # Стратегия перезагрузки
   reboot:
-    strategy: Never       # Never auto-reboot
+    strategy: Never        # Никогда не перезагружать автоматически
 EOF
 ```
 
-Проверка:
-
-```bash
-kubectl get mcp
-# NAME     TARGET   CURRENT   READY   UPDATED   DEGRADED   AGE
-# worker                      0       0         0          5s
-```
-
----
-
-## Шаг 3: Добавление лейбла на ноду
-
-Если у вашей ноды нет лейбла `worker`, добавьте его:
-
-```bash
-# Посмотреть ноды
-kubectl get nodes
-
-# Добавить лейбл (замените NODE_NAME на имя вашей ноды)
-kubectl label node NODE_NAME node-role.kubernetes.io/worker=""
-```
-
-Проверка:
-
+**Проверка:**
 ```bash
 kubectl get mcp worker
-# NAME     TARGET   CURRENT   READY   UPDATED   DEGRADED   AGE
-# worker                      1       0         0          1m
-#                             ^-- теперь 1 нода в пуле
 ```
 
 ---
 
-## Шаг 4: Создание MachineConfig
+## Шаг 2: Добавить лейбл на ноды
 
-Создадим конфигурацию NTP:
+Если ноды ещё не имеют лейбла worker:
+
+```bash
+# Получить список нод
+kubectl get nodes
+
+# Добавить лейбл (замените NODE_NAME)
+kubectl label node NODE_NAME node-role.kubernetes.io/worker=""
+
+# Проверить
+kubectl get mcp worker -o jsonpath='{.status.machineCount}'
+```
+
+---
+
+## Шаг 3: Создать MachineConfig
+
+Создадим простой конфигурационный файл:
 
 ```bash
 cat <<EOF | kubectl apply -f -
 apiVersion: mco.in-cloud.io/v1alpha1
 kind: MachineConfig
 metadata:
-  name: ntp-config
+  name: my-first-config
   labels:
-    mco.in-cloud.io/pool: worker    # Must match pool's machineConfigSelector
+    mco.in-cloud.io/pool: worker    # Связь с пулом
 spec:
   priority: 50
   files:
-    - path: /etc/chrony.conf
+    - path: /etc/myapp/config.yaml
       content: |
-        # MCO Lite managed NTP configuration
-        server time.google.com iburst
-        server time.cloudflare.com iburst
-        driftfile /var/lib/chrony/drift
-        makestep 1.0 3
-        rtcsync
-      mode: 420   # 0644 in decimal
+        # My Application Config
+        server:
+          port: 8080
+          host: 0.0.0.0
+        logging:
+          level: info
+          format: json
+      mode: 420    # 0644 в decimal
       owner: "root:root"
-      state: present
-  systemd:
-    units:
-      - name: chronyd.service
-        enabled: true
-        state: started
-  reboot:
-    required: false
 EOF
 ```
 
 ---
 
-## Шаг 5: Проверка результата
-
-### 5.1 RenderedMachineConfig создан
+## Шаг 4: Дождаться применения
 
 ```bash
-kubectl get rmc
-# NAME                        POOL     REVISION     REBOOT   AGE
-# rendered-worker-a1b2c3d4e5  worker   a1b2c3d4e5   false    10s
+# Следить за статусом
+kubectl get mcp worker -w
+
+# Или проверить условия
+kubectl get mcp worker -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
 ```
 
-### 5.2 Статус пула обновился
+Когда `Ready: True` — конфигурация применена на всех нодах и нет ошибок.
+
+---
+
+## Шаг 5: Проверить результат
 
 ```bash
-kubectl get mcp worker
-# NAME     TARGET                      CURRENT                     READY  ...
-# worker   rendered-worker-a1b2c3d4e5  rendered-worker-a1b2c3d4e5  1      ...
-```
+# Проверить аннотации ноды
+kubectl get nodes -o custom-columns='\
+NAME:.metadata.name,\
+STATE:.metadata.annotations.mco\.in-cloud\.io/agent-state,\
+REVISION:.metadata.annotations.mco\.in-cloud\.io/current-revision'
 
-### 5.3 Аннотации ноды
-
-```bash
-kubectl get node NODE_NAME -o jsonpath='{.metadata.annotations}' | jq .
-# {
-#   "mco.in-cloud.io/current-revision": "rendered-worker-a1b2c3d4e5",
-#   "mco.in-cloud.io/desired-revision": "rendered-worker-a1b2c3d4e5",
-#   "mco.in-cloud.io/agent-state": "done",
-#   "mco.in-cloud.io/pool": "worker"
-# }
-```
-
-### 5.4 Файл на ноде (опционально)
-
-Если есть SSH-доступ к ноде:
-
-```bash
-ssh NODE_NAME cat /etc/chrony.conf
-# # MCO Lite managed NTP configuration
-# server time.google.com iburst
-# ...
-```
-
-Или через kubectl (если Agent имеет debug возможности):
-
-```bash
-# В minikube
-minikube ssh "cat /etc/chrony.conf"
+# Проверить файл на ноде (через agent pod)
+AGENT_POD=$(kubectl get pod -n mco-system -l app=mco-agent -o name | head -1)
+kubectl exec -n mco-system $AGENT_POD -- cat /host/etc/myapp/config.yaml
 ```
 
 ---
 
-## Что произошло?
+## Что произошло
 
 ```
-1. Вы создали MachineConfigPool "worker"
-   ↓
-2. Pool выбрал ноды по nodeSelector
-   ↓
-3. Вы создали MachineConfig "ntp-config"
-   ↓
-4. Controller увидел новый MC
-   ↓
-5. [Debounce 5 сек]
-   ↓
-6. Renderer создал RenderedMachineConfig
-   ↓
-7. Controller записал desired-revision на ноду
-   ↓
+1. Вы создали MachineConfig
+         ↓
+2. Controller увидел изменение
+         ↓
+3. [Debounce 30s] Ждал стабилизации
+         ↓
+4. Renderer создал RenderedMachineConfig
+         ↓
+5. Controller установил desired-revision на ноды
+         ↓
+6. Controller cordoned первую ноду
+         ↓
+7. Controller drain (эвакуация подов)
+         ↓
 8. Agent увидел изменение
-   ↓
-9. Applier записал файл и запустил chronyd
-   ↓
-10. Agent записал current-revision = desired-revision
-    ↓
-11. Status Aggregator обновил статус пула
+         ↓
+9. Agent применил файл
+         ↓
+10. Agent обновил current-revision
+         ↓
+11. Controller uncordoned ноду
+         ↓
+12. Повторил для следующей ноды
+         ↓
+13. Status Ready: True
+```
+
+---
+
+## Следующий шаг: Обновить конфигурацию
+
+```bash
+# Изменить содержимое
+kubectl patch mc my-first-config --type=merge -p '
+spec:
+  files:
+    - path: /etc/myapp/config.yaml
+      content: |
+        # Updated config
+        server:
+          port: 9090
+          host: 0.0.0.0
+        logging:
+          level: debug
+          format: json
+'
+
+# Следить за rolling update
+kubectl get mcp worker -w
+
+# Проверить новый контент
+kubectl exec -n mco-system $AGENT_POD -- cat /host/etc/myapp/config.yaml
+```
+
+---
+
+## Очистка
+
+```bash
+# Удалить MachineConfig
+kubectl delete mc my-first-config
+
+# Удалить MachineConfigPool
+kubectl delete mcp worker
+```
+
+---
+
+## Частые вопросы
+
+### Почему ноды обновляются по одной?
+
+Это контролируется `maxUnavailable: 1`. Для более быстрого обновления:
+
+```yaml
+rollout:
+  maxUnavailable: "50%"    # Половина нод одновременно
+```
+
+### Почему debounce 30 секунд?
+
+Чтобы не делать множество рендеров при пакетных изменениях. Для быстрой разработки:
+
+```yaml
+rollout:
+  debounceSeconds: 5
+```
+
+### Как проверить что пошло не так?
+
+```bash
+# Статус пула
+kubectl describe mcp worker
+
+# Логи controller
+kubectl logs -n mco-system deployment/mco-controller
+
+# Логи agent
+kubectl logs -n mco-system -l app=mco-agent
 ```
 
 ---
 
 ## Следующие шаги
 
-### Изменить конфигурацию
+- [MachineConfig](../user-guide/machineconfig.md) — полное руководство по конфигурациям
+- [MachineConfigPool](../user-guide/machineconfigpool.md) — настройка пулов
+- [Rolling Update](../user-guide/rolling-update.md) — управление раскаткой
+- [Примеры](../examples/README.md) — больше примеров
 
-```bash
-# Обновить содержимое файла
-kubectl edit mc ntp-config
-# Измените content и сохраните
-
-# Посмотреть как создаётся новый RMC
-kubectl get rmc -w
-```
-
-### Добавить ещё один MachineConfig
-
-```bash
-kubectl apply -f docs/examples/basic/02-sysctl-config.yaml
-```
-
-### Удалить конфигурацию
-
-```bash
-kubectl delete mc ntp-config
-# RMC обновится автоматически (без ntp-config)
-```
-
----
-
-## Полезные команды
-
-```bash
-# Статус всех пулов
-kubectl get mcp
-
-# Все MachineConfig
-kubectl get mc
-
-# Все RenderedMachineConfig
-kubectl get rmc
-
-# Статус конкретной ноды
-kubectl get node NODE_NAME \
-  -o custom-columns='NAME:.metadata.name,STATE:.metadata.annotations.mco\.in-cloud\.io/agent-state,REVISION:.metadata.annotations.mco\.in-cloud\.io/current-revision'
-
-# Логи Controller
-kubectl logs -n mco-system deployment/mco-controller -f
-
-# Логи Agent
-kubectl logs -n mco-system -l app=mco-agent -f
-```
-
----
-
-## Дальнейшее изучение
-
-- [MachineConfig](../user-guide/machineconfig.md) — все возможности конфигурации
-- [Примеры](../examples/README.md) — готовые примеры для разных сценариев
-- [Проверка применения](../user-guide/verification.md) — детальная диагностика

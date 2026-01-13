@@ -18,6 +18,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 // RolloutConfig defines rollout behavior for the pool.
@@ -38,6 +39,29 @@ type RolloutConfig struct {
 	// +kubebuilder:default=600
 	// +optional
 	ApplyTimeoutSeconds int `json:"applyTimeoutSeconds,omitempty"`
+
+	// MaxUnavailable is the maximum number of nodes that can be unavailable
+	// during an update. Value can be an absolute number (ex: 5) or a percentage
+	// of total nodes (ex: "10%"). Defaults to 1.
+	// +optional
+	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
+
+	// DrainTimeoutSeconds is the maximum time in seconds to wait for a node drain
+	// to complete before marking it as stuck. The drain will continue retrying.
+	// Defaults to 3600 (1 hour).
+	// +kubebuilder:validation:Minimum=60
+	// +kubebuilder:validation:Maximum=86400
+	// +kubebuilder:default=3600
+	// +optional
+	DrainTimeoutSeconds int `json:"drainTimeoutSeconds,omitempty"`
+
+	// DrainRetrySeconds is the interval between drain retry attempts.
+	// If not specified, calculated as max(30, drainTimeoutSeconds/12).
+	// This allows approximately 12 retry attempts before timeout.
+	// +kubebuilder:validation:Minimum=10
+	// +kubebuilder:validation:Maximum=1800
+	// +optional
+	DrainRetrySeconds int `json:"drainRetrySeconds,omitempty"`
 }
 
 // RebootPolicy defines the reboot behavior for nodes in the pool.
@@ -135,6 +159,12 @@ type MachineConfigPoolStatus struct {
 	// PendingRebootCount is the number of nodes waiting for a reboot.
 	PendingRebootCount int `json:"pendingRebootCount"`
 
+	// CordonedMachineCount is the number of nodes that are cordoned.
+	CordonedMachineCount int `json:"cordonedMachineCount"`
+
+	// DrainingMachineCount is the number of nodes that are being drained.
+	DrainingMachineCount int `json:"drainingMachineCount"`
+
 	// Conditions represent the latest available observations of the pool's state.
 	// +optional
 	// +patchMergeKey=type
@@ -146,17 +176,29 @@ type MachineConfigPoolStatus struct {
 
 // Condition types for MachineConfigPool.
 const (
-	// ConditionUpdated indicates all nodes have the target revision.
-	ConditionUpdated string = "Updated"
+	// ConditionReady indicates the pool is fully updated and healthy.
+	// Status=True: All nodes on target revision, no errors.
+	// Status=False: Rollout in progress, errors, or issues.
+	// Reasons: AllNodesUpdated, NoMachineConfigs, RolloutInProgress, DrainBlocked, Degraded, PoolOverlap
+	ConditionReady string = "Ready"
 
 	// ConditionUpdating indicates some nodes are still applying the target revision.
+	// Kept for monitoring/alerting convenience.
 	ConditionUpdating string = "Updating"
 
+	// ConditionDraining indicates drain operation is in progress.
+	// Reasons: InProgress, PDBBlocked, EvictionFailed, Complete
+	ConditionDraining string = "Draining"
+
 	// ConditionDegraded indicates one or more nodes are in error state.
+	// Reasons: NodeError, RenderFailed, ApplyTimeout
 	ConditionDegraded string = "Degraded"
 
-	// ConditionRenderDegraded indicates the renderer failed to create a RenderedMachineConfig.
-	ConditionRenderDegraded string = "RenderDegraded"
+	// ConditionPoolOverlap indicates nodes in this pool also match other pools.
+	ConditionPoolOverlap string = "PoolOverlap"
+
+	// ConditionDrainStuck indicates drain has been stuck for longer than timeout.
+	ConditionDrainStuck string = "DrainStuck"
 )
 
 // +kubebuilder:object:root=true

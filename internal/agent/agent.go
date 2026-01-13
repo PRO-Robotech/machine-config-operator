@@ -18,7 +18,9 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -80,6 +82,13 @@ type Agent struct {
 	// for reboot. This prevents re-applying the same config on every watch event
 	// when the node object in the event is stale.
 	pendingRebootRevision string
+
+	// Update processing with cancellation support.
+	// This allows canceling in-flight updates when desired-revision changes.
+	updateMu            sync.Mutex
+	currentUpdateCancel context.CancelFunc
+	currentDesiredRev   string
+	currentUpdateID     uint64
 }
 
 // New creates a new Agent with the given configuration.
@@ -232,12 +241,55 @@ func (a *Agent) watchNode(ctx context.Context) error {
 				continue
 			}
 
-			if err := a.handleNodeUpdate(ctx, node); err != nil {
-				log.Error(err, "failed to handle node update")
+			// Process update with cancellation support for stale updates.
+			// If desired-revision changed, cancel any in-flight update for old revision.
+			if err := a.processNodeUpdateWithCancel(ctx, node); err != nil {
+				if errors.Is(err, context.Canceled) {
+					log.V(1).Info("update canceled due to newer revision")
+				} else {
+					log.Error(err, "failed to handle node update")
+				}
 				// Continue watching, don't return error
 			}
 		}
 	}
+}
+
+// processNodeUpdateWithCancel processes a node update with cancellation support.
+// If the desired-revision changes while an update is in progress, the old update is canceled.
+func (a *Agent) processNodeUpdateWithCancel(ctx context.Context, node *corev1.Node) error {
+	desired := annotations.GetAnnotation(node.Annotations, annotations.DesiredRevision)
+
+	a.updateMu.Lock()
+	// Cancel any in-flight update if desired revision changed
+	if a.currentUpdateCancel != nil && desired != a.currentDesiredRev {
+		agentLog.V(1).Info("canceling stale update",
+			"oldRevision", a.currentDesiredRev,
+			"newRevision", desired)
+		a.currentUpdateCancel()
+		a.currentUpdateCancel = nil
+	}
+
+	// Create cancelable context for this update
+	updateCtx, cancel := context.WithCancel(ctx)
+	a.currentUpdateCancel = cancel
+	a.currentDesiredRev = desired
+	a.currentUpdateID++
+	myUpdateID := a.currentUpdateID
+	a.updateMu.Unlock()
+
+	// Ensure we clean up when done
+	defer func() {
+		a.updateMu.Lock()
+		// Only clear if we're still the current update
+		if a.currentUpdateID == myUpdateID {
+			a.currentUpdateCancel = nil
+			a.currentDesiredRev = ""
+		}
+		a.updateMu.Unlock()
+	}()
+
+	return a.handleNodeUpdate(updateCtx, node)
 }
 
 // handleNodeUpdate processes a node update and triggers apply if needed.
@@ -282,7 +334,7 @@ func (a *Agent) handleNodeUpdate(ctx context.Context, node *corev1.Node) error {
 
 	rmc, err := a.fetchRMCWithRetry(ctx, desired)
 	if err != nil {
-		a.writer.SetStateWithError(ctx, annotations.StateError, fmt.Sprintf("fetch RMC: %v", err))
+		_ = a.writer.SetStateWithError(ctx, annotations.StateError, fmt.Sprintf("fetch RMC: %v", err))
 		return fmt.Errorf("fetch RMC %s: %w", desired, err)
 	}
 
@@ -290,18 +342,23 @@ func (a *Agent) handleNodeUpdate(ctx context.Context, node *corev1.Node) error {
 }
 
 // fetchRMCWithRetry fetches an RMC with exponential backoff retry.
+// The context can be canceled to abort retries (e.g., when desired-revision changes).
 func (a *Agent) fetchRMCWithRetry(ctx context.Context, name string) (*mcov1alpha1.RenderedMachineConfig, error) {
 	var rmc *mcov1alpha1.RenderedMachineConfig
 	var lastErr error
 
 	backoff := wait.Backoff{
-		Duration: 5 * time.Second,
+		Duration: 2 * time.Second,
 		Factor:   2.0,
-		Steps:    5,
-		Cap:      5 * time.Minute,
+		Steps:    4,
+		Cap:      30 * time.Second,
 	}
 
 	err := wait.ExponentialBackoffWithContext(ctx, backoff, func(ctx context.Context) (bool, error) {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+
 		var err error
 		rmc, err = a.mcoClient.RenderedMachineConfigs().Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
@@ -316,6 +373,9 @@ func (a *Agent) fetchRMCWithRetry(ctx context.Context, name string) (*mcov1alpha
 	})
 
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
 		if wait.Interrupted(err) && lastErr != nil {
 			return nil, lastErr
 		}
@@ -364,7 +424,7 @@ func (a *Agent) applyConfig(ctx context.Context, rmc *mcov1alpha1.RenderedMachin
 	result, err := a.applier.ApplySpec(ctx, &rmc.Spec)
 	if err != nil {
 		log.Error(err, "apply failed")
-		a.writer.SetStateWithError(ctx, annotations.StateError, err.Error())
+		_ = a.writer.SetStateWithError(ctx, annotations.StateError, err.Error())
 		return err
 	}
 
@@ -373,6 +433,17 @@ func (a *Agent) applyConfig(ctx context.Context, rmc *mcov1alpha1.RenderedMachin
 		"filesSkipped", result.FilesSkipped,
 		"unitsApplied", result.UnitsApplied,
 		"unitsSkipped", result.UnitsSkipped)
+
+	// If no changes were applied, skip reboot check entirely.
+	// This prevents unnecessary reboots when files already exist on host.
+	if result.FilesApplied == 0 && result.UnitsApplied == 0 {
+		log.Info("no changes applied, skipping reboot check")
+		a.pendingRebootRevision = ""
+		if err := a.writer.SetDone(ctx, rmc.Name); err != nil {
+			return fmt.Errorf("set done state: %w", err)
+		}
+		return nil
+	}
 
 	currentRevision := annotations.GetAnnotation(node.Annotations, annotations.CurrentRevision)
 	decision := a.rebootDeterminer.DetermineReboot(ctx, currentRevision, rmc)
@@ -386,7 +457,7 @@ func (a *Agent) applyConfig(ctx context.Context, rmc *mcov1alpha1.RenderedMachin
 	rmc.Spec.Reboot.Required = decision.Required
 	if err := a.rebootHandler.HandleReboot(ctx, rmc, node); err != nil {
 		log.Error(err, "failed to handle reboot")
-		a.writer.SetStateWithError(ctx, annotations.StateError, fmt.Sprintf("reboot handling: %v", err))
+		_ = a.writer.SetStateWithError(ctx, annotations.StateError, fmt.Sprintf("reboot handling: %v", err))
 		return err
 	}
 	rmc.Spec.Reboot.Required = originalRequired

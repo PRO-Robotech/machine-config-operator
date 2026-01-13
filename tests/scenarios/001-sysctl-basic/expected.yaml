@@ -1,0 +1,39 @@
+# Machine-readable expectations for scenario 001-sysctl-basic
+# Used by automated test framework
+
+scenario:
+  name: sysctl-basic
+  description: Apply sysctl configuration file
+  timeout: 60s
+
+# File expectations
+files:
+  - path: /etc/sysctl.d/99-mco-test.conf
+    exists: true
+    mode: "644"
+    owner: "root:root"
+    contains:
+      - "fs.inotify.max_user_watches = 524288"
+      - "net.core.somaxconn = 4096"
+      - "vm.swappiness = 10"
+
+# Sysctl value expectations (after sysctl --system)
+sysctl:
+  - key: fs.inotify.max_user_watches
+    value: "524288"
+  - key: net.core.somaxconn
+    value: "4096"
+  - key: vm.swappiness
+    value: "10"
+
+# Kubernetes resource expectations
+resources:
+  machineconfig:
+    name: 50-sysctl-test
+    exists: true
+
+# Node annotation expectations
+node_annotations:
+  mco.in-cloud.io/agent-state: "idle"
+  mco.in-cloud.io/current-revision:
+    pattern: "^worker-"  # Starts with worker- (RMC naming pattern)

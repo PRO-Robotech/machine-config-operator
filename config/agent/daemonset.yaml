@@ -21,7 +21,9 @@ spec:
       hostPID: true
       containers:
         - name: agent
-          image: mco-agent:latest
+          # NOTE: kustomize replaces this image name via config/agent/kustomization.yaml
+          # (e.g. agent=mco-agent:e2e for E2E tests).
+          image: agent:latest
           imagePullPolicy: Never
           args:
             - --host-root=/host

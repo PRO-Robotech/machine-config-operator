@@ -19,7 +19,9 @@ spec:
     matchLabels:
       mco.in-cloud.io/pool: worker
   rollout:                             # Настройки раскатки
+    maxUnavailable: 1
     debounceSeconds: 30
+    drainTimeoutSeconds: 3600
   reboot:                              # Политика перезагрузки
     strategy: Never
   revisionHistory:                     # Хранение старых ревизий
@@ -74,8 +76,8 @@ nodeSelector:
       values: ["production", "staging"]
 ```
 
-> **Важно:** Нода может принадлежать только **одному** пулу.
-> Если селекторы пересекаются — поведение не определено.
+> **Важно:** Нода должна принадлежать **только одному** пулу.
+> Если селекторы пересекаются — устанавливается condition `PoolOverlap`.
 
 ---
 
@@ -92,17 +94,6 @@ spec:
 
 Все MachineConfig с этой меткой будут объединены в RenderedMachineConfig для данного пула.
 
-```yaml
-# Комбинированный селектор
-machineConfigSelector:
-  matchLabels:
-    mco.in-cloud.io/pool: worker
-  matchExpressions:
-    - key: app.kubernetes.io/component
-      operator: In
-      values: ["base", "network"]
-```
-
 ---
 
 ### spec.rollout
@@ -112,20 +103,40 @@ machineConfigSelector:
 ```yaml
 spec:
   rollout:
+    maxUnavailable: 1
     debounceSeconds: 30
     applyTimeoutSeconds: 600
+    drainTimeoutSeconds: 3600
+    drainRetrySeconds: 300
 ```
 
 | Поле | Тип | По умолчанию | Диапазон | Описание |
 |------|-----|--------------|----------|----------|
+| `maxUnavailable` | IntOrString | 1 | 1+ или % | Макс. unavailable нод |
 | `debounceSeconds` | int | 30 | 0-3600 | Задержка перед рендером |
 | `applyTimeoutSeconds` | int | 600 | 60-3600 | Таймаут применения |
+| `drainTimeoutSeconds` | int | 3600 | 60-86400 | Таймаут drain |
+| `drainRetrySeconds` | int | auto | 10-1800 | Интервал retry drain |
+
+#### maxUnavailable
+
+Контролирует скорость раскатки:
+
+```yaml
+# Последовательное обновление (самое безопасное)
+maxUnavailable: 1
+
+# Параллельное обновление (быстрее)
+maxUnavailable: 3
+
+# Процент от общего числа нод
+maxUnavailable: "25%"    # ceiling: 3 из 10
+maxUnavailable: "50%"    # 5 из 10
+```
 
 #### debounceSeconds
 
-**Зачем нужно:**
-- Предотвращает множественные ре-рендеры при пакетных изменениях
-- Позволяет применить несколько MC за один раз
+Предотвращает множественные ре-рендеры:
 
 ```yaml
 # Быстрое применение (для разработки)
@@ -138,17 +149,22 @@ debounceSeconds: 30
 debounceSeconds: 300
 ```
 
-#### applyTimeoutSeconds
+#### drainTimeoutSeconds
 
-Если нода не применила конфиг за это время — она помечается как degraded.
+Таймаут для drain операции:
 
 ```yaml
-# Стандартный таймаут
-applyTimeoutSeconds: 600    # 10 минут
+# Быстрый drain (stateless apps)
+drainTimeoutSeconds: 300    # 5 минут
 
-# Для больших конфигов
-applyTimeoutSeconds: 1200   # 20 минут
+# Стандартный
+drainTimeoutSeconds: 3600   # 1 час
+
+# Длительный (stateful apps)
+drainTimeoutSeconds: 7200   # 2 часа
 ```
+
+При превышении timeout устанавливается condition `DrainStuck`, но drain продолжает попытки.
 
 ---
 
@@ -186,21 +202,6 @@ reboot:
   minIntervalSeconds: 600    # Не чаще раза в 10 минут
 ```
 
-#### minIntervalSeconds
-
-Защита от "reboot storm" — минимальный интервал между перезагрузками одной ноды.
-
-```yaml
-# Консервативно (production)
-minIntervalSeconds: 3600    # 1 час
-
-# Умеренно
-minIntervalSeconds: 1800    # 30 минут
-
-# Агрессивно (dev)
-minIntervalSeconds: 300     # 5 минут
-```
-
 ---
 
 ### spec.revisionHistory
@@ -211,21 +212,6 @@ minIntervalSeconds: 300     # 5 минут
 spec:
   revisionHistory:
     limit: 5
-```
-
-| Поле | Тип | По умолчанию | Описание |
-|------|-----|--------------|----------|
-| `limit` | int | 5 | Макс. количество старых RMC |
-
-```yaml
-# Хранить историю
-limit: 10
-
-# Минимум (экономия ресурсов)
-limit: 2
-
-# Без ограничений (не рекомендуется)
-limit: 0
 ```
 
 > **Примечание:** Текущий RMC (target) не считается в limit.
@@ -244,12 +230,7 @@ spec:
 Когда `paused: true`:
 - Новые RMC **не создаются**
 - Ноды **не обновляются** (desired-revision не меняется)
-- Статус пула **не обновляется**
-
-**Используйте для:**
-- Плановых работ
-- Расследования проблем
-- Ручного контроля раскатки
+- Существующие operations **не отменяются**
 
 ```bash
 # Приостановить пул
@@ -263,8 +244,6 @@ kubectl patch mcp worker --type=merge -p '{"spec":{"paused":false}}'
 
 ## Статус пула (status)
 
-Статус автоматически обновляется Controller.
-
 ```yaml
 status:
   targetRevision: rendered-worker-a1b2c3d4e5
@@ -275,11 +254,18 @@ status:
   updatedMachineCount: 3
   updatingMachineCount: 0
   degradedMachineCount: 0
-  unavailableMachineCount: 0
+  cordonedMachineCount: 0
+  drainingMachineCount: 0
   pendingRebootCount: 0
   conditions:
-    - type: Updated
+    - type: Ready
       status: "True"
+    - type: Updating
+      status: "False"
+    - type: Draining
+      status: "False"
+    - type: Degraded
+      status: "False"
 ```
 
 ### Ревизии
@@ -299,22 +285,26 @@ status:
 | `updatedMachineCount` | current == target |
 | `updatingMachineCount` | state == applying |
 | `degradedMachineCount` | state == error |
+| `cordonedMachineCount` | cordoned == true |
+| `drainingMachineCount` | cordoned AND state != done |
 | `pendingRebootCount` | reboot-pending == true |
 
 ### Условия (Conditions)
 
 | Condition | True когда |
 |-----------|------------|
-| `Updated` | Все ноды имеют target revision |
+| `Ready` | Все ноды имеют target revision и в состоянии done |
 | `Updating` | Хотя бы одна нода применяет конфиг |
-| `Degraded` | Хотя бы одна нода в ошибке |
-| `RenderDegraded` | Ошибка при создании RMC |
+| `Draining` | Хотя бы одна нода в процессе drain |
+| `Degraded` | Хотя бы одна нода в ошибке ИЛИ ошибка рендеринга (Reason=RenderFailed) |
+| `PoolOverlap` | Нода матчит несколько пулов |
+| `DrainStuck` | Drain превысил timeout |
 
 ---
 
 ## Типичные сценарии
 
-### Worker pool
+### Worker pool (production)
 
 ```yaml
 apiVersion: mco.in-cloud.io/v1alpha1
@@ -329,7 +319,9 @@ spec:
     matchLabels:
       mco.in-cloud.io/pool: worker
   rollout:
+    maxUnavailable: 1           # По одной ноде
     debounceSeconds: 30
+    drainTimeoutSeconds: 3600
   reboot:
     strategy: Never
   revisionHistory:
@@ -351,34 +343,36 @@ spec:
     matchLabels:
       mco.in-cloud.io/pool: master
   rollout:
-    debounceSeconds: 60          # Больше задержка
-    applyTimeoutSeconds: 900     # Больше таймаут
+    maxUnavailable: 1
+    debounceSeconds: 60
+    drainTimeoutSeconds: 7200   # 2 часа — control plane критичен
   reboot:
-    strategy: IfRequired         # Авто-перезагрузка
-    minIntervalSeconds: 3600     # Не чаще раза в час
+    strategy: Never
   revisionHistory:
-    limit: 10                    # Больше истории
+    limit: 10
 ```
 
-### GPU pool
+### Staging pool (быстрое обновление)
 
 ```yaml
 apiVersion: mco.in-cloud.io/v1alpha1
 kind: MachineConfigPool
 metadata:
-  name: gpu
+  name: staging
 spec:
   nodeSelector:
     matchLabels:
-      node.kubernetes.io/gpu: "true"
+      environment: staging
   machineConfigSelector:
     matchLabels:
-      mco.in-cloud.io/pool: gpu
+      mco.in-cloud.io/pool: staging
   rollout:
-    debounceSeconds: 60
+    maxUnavailable: "50%"       # Половина нод сразу
+    debounceSeconds: 5
+    drainTimeoutSeconds: 300
   reboot:
-    strategy: IfRequired    # Драйверы могут требовать перезагрузку
-    minIntervalSeconds: 1800
+    strategy: IfRequired
+    minIntervalSeconds: 300
 ```
 
 ---
@@ -392,11 +386,11 @@ kubectl get mcp
 # Детали пула
 kubectl describe mcp worker
 
-# Статус в формате wide
-kubectl get mcp -o wide
-
 # Условия пула
-kubectl get mcp worker -o jsonpath='{.status.conditions}'
+kubectl get mcp worker -o jsonpath='{.status.conditions}' | jq .
+
+# Счётчики нод
+kubectl get mcp worker -o jsonpath='{.status}'
 
 # Ноды в пуле
 kubectl get nodes -l node-role.kubernetes.io/worker
@@ -413,5 +407,7 @@ kubectl patch mcp worker --type=merge -p '{"spec":{"paused":false}}'
 ## Связанные документы
 
 - [MachineConfig](machineconfig.md) — создание конфигураций
+- [Rolling Update](rolling-update.md) — настройка раскатки
+- [Cordon/Drain](cordon-drain.md) — безопасное обновление
 - [Мониторинг статуса](status-monitoring.md) — отслеживание состояния
-- [Примеры](../examples/README.md) — готовые примеры пулов
+

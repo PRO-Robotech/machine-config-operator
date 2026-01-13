@@ -216,6 +216,32 @@ spec:
                     maximum: 3600
                     minimum: 0
                     type: integer
+                  drainRetrySeconds:
+                    description: |-
+                      DrainRetrySeconds is the interval between drain retry attempts.
+                      If not specified, calculated as max(30, drainTimeoutSeconds/12).
+                      This allows approximately 12 retry attempts before timeout.
+                    maximum: 1800
+                    minimum: 10
+                    type: integer
+                  drainTimeoutSeconds:
+                    default: 3600
+                    description: |-
+                      DrainTimeoutSeconds is the maximum time in seconds to wait for a node drain
+                      to complete before marking it as stuck. The drain will continue retrying.
+                      Defaults to 3600 (1 hour).
+                    maximum: 86400
+                    minimum: 60
+                    type: integer
+                  maxUnavailable:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      MaxUnavailable is the maximum number of nodes that can be unavailable
+                      during an update. Value can be an absolute number (ex: 5) or a percentage
+                      of total nodes (ex: "10%"). Defaults to 1.
+                    x-kubernetes-int-or-string: true
                 type: object
             type: object
           status:
@@ -282,6 +308,10 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              cordonedMachineCount:
+                description: CordonedMachineCount is the number of nodes that are
+                  cordoned.
+                type: integer
               currentRevision:
                 description: |-
                   CurrentRevision is the most common revision among nodes in the pool.
@@ -290,6 +320,10 @@ spec:
               degradedMachineCount:
                 description: DegradedMachineCount is the number of nodes with state
                   == error.
+                type: integer
+              drainingMachineCount:
+                description: DrainingMachineCount is the number of nodes that are
+                  being drained.
                 type: integer
               lastSuccessfulRevision:
                 description: |-
@@ -325,7 +359,9 @@ spec:
                   == applying.
                 type: integer
             required:
+            - cordonedMachineCount
             - degradedMachineCount
+            - drainingMachineCount
             - machineCount
             - pendingRebootCount
             - readyMachineCount

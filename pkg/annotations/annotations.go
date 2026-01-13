@@ -44,6 +44,15 @@ const (
 	// RebootPending is "true" if a reboot is needed but blocked by policy.
 	RebootPending = Prefix + "reboot-pending"
 
+	// Cordoned is "true" if the node was cordoned by MCO for update.
+	Cordoned = Prefix + "cordoned"
+
+	// DrainStartedAt contains the timestamp when drain started.
+	DrainStartedAt = Prefix + "drain-started-at"
+
+	// DrainRetryCount contains the number of drain retry attempts.
+	DrainRetryCount = Prefix + "drain-retry-count"
+
 	// Control annotations (set by user/operator).
 
 	// Paused is "true" to exclude the node from rollout.
@@ -51,6 +60,18 @@ const (
 
 	// ForceReboot is "true" to force reboot ignoring minInterval.
 	ForceReboot = Prefix + "force-reboot"
+
+	// DesiredRevisionSetAt records when the controller set desired-revision.
+	// Used for apply timeout detection.
+	DesiredRevisionSetAt = Prefix + "desired-revision-set-at"
+)
+
+// Boolean annotation values.
+const (
+	// ValueTrue is the string "true" used for boolean annotations.
+	ValueTrue = "true"
+	// ValueFalse is the string "false" used for boolean annotations.
+	ValueFalse = "false"
 )
 
 // Agent state values.
@@ -80,7 +101,7 @@ func GetAnnotation(annotations map[string]string, key string) string {
 // GetBoolAnnotation gets an annotation as a boolean.
 // Returns true only if the annotation value is exactly "true".
 func GetBoolAnnotation(annotations map[string]string, key string) bool {
-	return GetAnnotation(annotations, key) == "true"
+	return GetAnnotation(annotations, key) == ValueTrue
 }
 
 // SetAnnotation sets an annotation value, creating the map if nil.

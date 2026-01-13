@@ -38,7 +38,7 @@ type ApplyResult struct {
 // It applies files first (sorted by path), then systemd units (sorted by name).
 // On any error, it stops immediately and returns the partial result.
 type Applier struct {
-	files   *FileApplier
+	files   FileOperations
 	systemd *SystemdApplier
 }
 
@@ -56,6 +56,14 @@ func NewApplier(hostRoot string, conn SystemdConnection) *Applier {
 func NewApplierWithOptions(hostRoot string, conn SystemdConnection, skipOwnership bool) *Applier {
 	return &Applier{
 		files:   NewFileApplierWithOptions(hostRoot, skipOwnership),
+		systemd: NewSystemdApplier(conn),
+	}
+}
+
+// NewApplierWithFileOps creates an applier with custom file operations.
+func NewApplierWithFileOps(files FileOperations, conn SystemdConnection) *Applier {
+	return &Applier{
+		files:   files,
 		systemd: NewSystemdApplier(conn),
 	}
 }

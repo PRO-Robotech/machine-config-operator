@@ -1,0 +1,29 @@
+---
+apiVersion: mco.in-cloud.io/v1alpha1
+kind: MachineConfig
+metadata:
+  name: 50-sysctl-test
+  labels:
+    mco.in-cloud.io/pool: worker
+spec:
+  priority: 50
+  files:
+    - path: /etc/sysctl.d/99-mco-test.conf
+      content: |
+        # MCO Lite test sysctl parameters
+        # Applied by scenario 001-sysctl-basic
+
+        # Increase max user watches (for file monitoring)
+        fs.inotify.max_user_watches = 524288
+
+        # Network tuning (safe values)
+        net.core.somaxconn = 4096
+
+        # VM tuning
+        vm.swappiness = 10
+      mode: 0644
+      owner: root:root
+      state: present
+
+  reboot:
+    required: false

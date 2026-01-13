@@ -40,11 +40,23 @@ spec:
 
 - **Меньший** приоритет применяется **первым**
 - **Больший** приоритет **побеждает** при конфликтах
+- При **равном** приоритете побеждает **большее имя** (алфавитно)
 
 ```yaml
-# Пример: override базовой конфигурации
+# Базовая конфигурация
 spec:
-  priority: 100    # Высокий приоритет → переопределит priority: 50
+  priority: 30
+
+# Override конфигурация (победит при конфликте)
+spec:
+  priority: 100
+```
+
+**Tie-breaker по имени:**
+```yaml
+# При priority=50 у обоих:
+# "50-alpha" → content: "alpha"
+# "50-beta"  → content: "beta"  ← победит ("beta" > "alpha")
 ```
 
 ---
@@ -181,12 +193,6 @@ spec:
 - `.mount` — точки монтирования
 - `.target` — цели
 
-```yaml
-name: nginx.service
-name: docker.socket
-name: backup.timer
-```
-
 #### enabled
 
 ```yaml
@@ -208,14 +214,6 @@ enabled: null     # Пропустить enable/disable
 | `stopped` | systemctl stop | Остановить сервис |
 | `restarted` | systemctl restart | Перезапустить |
 | `reloaded` | systemctl reload | Перезагрузить конфиг |
-
-```yaml
-# Запустить если не запущен
-state: started
-
-# Перезапустить (всегда)
-state: restarted
-```
 
 #### mask
 
@@ -246,6 +244,7 @@ spec:
 | `reason` | string | — | Причина (информационно) |
 
 > **Примечание:** Перезагрузка произойдёт только если стратегия пула `IfRequired`.
+> При стратегии `Never` устанавливается аннотация `reboot-pending=true`.
 
 ---
 
@@ -458,5 +457,6 @@ metadata:
 ## Связанные документы
 
 - [MachineConfigPool](machineconfigpool.md) — настройка пулов
-- [Проверка применения](verification.md) — как убедиться что MC применился
+- [Мониторинг статуса](status-monitoring.md) — отслеживание состояния
 - [Примеры](../examples/README.md) — готовые примеры
+

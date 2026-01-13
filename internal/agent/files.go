@@ -31,12 +31,32 @@ import (
 	mcov1alpha1 "in-cloud.io/machine-config/api/v1alpha1"
 )
 
+// File state constants.
+const (
+	FileStatePresent = "present"
+	FileStateAbsent  = "absent"
+)
+
 // FileApplyResult contains the result of a file apply operation.
 type FileApplyResult struct {
 	Path    string
 	Applied bool // true if file was modified
 	Error   error
 }
+
+// FileOperations defines the interface for file operations.
+type FileOperations interface {
+	// Apply applies a single file spec.
+	Apply(f mcov1alpha1.FileSpec) FileApplyResult
+
+	// ApplyAll applies multiple file specs in order.
+	ApplyAll(files []mcov1alpha1.FileSpec) ([]FileApplyResult, error)
+
+	// NeedsUpdate checks if file needs update without applying.
+	NeedsUpdate(f mcov1alpha1.FileSpec) (bool, error)
+}
+
+var _ FileOperations = (*FileApplier)(nil)
 
 // FileApplier applies file configurations to the host filesystem.
 // It supports atomic writes, idempotent deletes, and content comparison.
@@ -76,15 +96,15 @@ func (a *FileApplier) Apply(f mcov1alpha1.FileSpec) FileApplyResult {
 
 	state := f.State
 	if state == "" {
-		state = "present"
+		state = FileStatePresent
 	}
 
 	switch state {
-	case "absent":
+	case FileStateAbsent:
 		applied, err := a.deleteFile(path)
 		result.Applied = applied
 		result.Error = err
-	case "present":
+	case FileStatePresent:
 		applied, err := a.writeFile(path, f)
 		result.Applied = applied
 		result.Error = err
@@ -142,7 +162,7 @@ func (a *FileApplier) writeFile(path string, f mcov1alpha1.FileSpec) (bool, erro
 	if err != nil {
 		return false, fmt.Errorf("create temp file: %w", err)
 	}
-	defer t.Cleanup()
+	defer func() { _ = t.Cleanup() }()
 
 	if _, err := t.Write(content); err != nil {
 		return false, fmt.Errorf("write content: %w", err)
@@ -242,7 +262,7 @@ func (a *FileApplier) NeedsUpdate(f mcov1alpha1.FileSpec) (bool, error) {
 	case "absent":
 		_, err := os.Stat(path)
 		if errors.Is(err, os.ErrNotExist) {
-			return false, nil // already absent
+			return false, nil
 		}
 		if err != nil {
 			return false, err

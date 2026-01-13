@@ -1,0 +1,16 @@
+# E2E test overlay - overrides image tags for Kind cluster testing
+# This overlay keeps base kustomization files clean and avoids dirty git state
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- ../default
+
+# Override image tags from 'latest' to 'e2e' for Kind cluster testing
+# Base kustomization transforms: controller -> mco-controller, agent -> mco-agent
+images:
+- name: mco-controller
+  newTag: e2e
+- name: mco-agent
+  newTag: e2e
+

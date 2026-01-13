@@ -1,0 +1,24 @@
+# Machine-readable expectations for scenario 003-file-absent
+# Used by automated test framework
+
+scenario:
+  name: file-absent
+  description: Delete a file using state absent
+  timeout: 60s
+
+# File expectations - file should NOT exist after apply
+files:
+  - path: /etc/mco-test/delete-me.txt
+    exists: false
+
+# Kubernetes resource expectations
+resources:
+  machineconfig:
+    name: 50-file-absent-test
+    exists: true
+
+# Node annotation expectations
+node_annotations:
+  mco.in-cloud.io/agent-state: "idle"
+  mco.in-cloud.io/current-revision:
+    pattern: "^worker-"

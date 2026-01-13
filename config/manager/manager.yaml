@@ -50,6 +50,27 @@ spec:
       #             operator: In
       #             values:
       #               - linux
+      # Controller must be able to run on control-plane nodes to avoid deadlock
+      # when all worker nodes are cordoned during rolling updates (maxUnavailable >= worker count).
+      # This is a critical architectural requirement.
+      tolerations:
+      # Allow scheduling on control-plane/master nodes
+      - key: "node-role.kubernetes.io/control-plane"
+        operator: "Exists"
+        effect: "NoSchedule"
+      - key: "node-role.kubernetes.io/master"
+        operator: "Exists"
+        effect: "NoSchedule"
+      # Allow scheduling on cordoned nodes to prevent controller disruption
+      - key: "node.kubernetes.io/unschedulable"
+        operator: "Exists"
+      # Stay on not-ready/unreachable nodes to maintain control during outages
+      - key: "node.kubernetes.io/not-ready"
+        operator: "Exists"
+      - key: "node.kubernetes.io/unreachable"
+        operator: "Exists"
+      # Use high priority to ensure controller is scheduled when resources are constrained
+      priorityClassName: system-cluster-critical
       securityContext:
         # Projects are configured by default to adhere to the "restricted" Pod Security Standards.
         # This ensures that deployments meet the highest security requirements for Kubernetes.
@@ -63,9 +84,21 @@ spec:
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
-        image: mco-controller:latest
+        # NOTE: kustomize replaces this image name via config/manager/kustomization.yaml
+        # (e.g. controller=mco-controller:e2e for E2E tests).
+        image: controller:latest
         imagePullPolicy: Never
         name: manager
+        # Downward API for controller pod identification
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         ports: []
         securityContext:
           readOnlyRootFilesystem: true

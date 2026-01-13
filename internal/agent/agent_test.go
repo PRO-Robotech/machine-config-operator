@@ -19,6 +19,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -427,12 +428,18 @@ func TestAgent_HandleNodeUpdate_RebootRequired(t *testing.T) {
 	k8sClient := fake.NewSimpleClientset(node)
 	mcoClient := newMockMCOClient()
 
-	// Add RMC that requires reboot
+	// Use temp dir so file operations work
+	tmpDir := t.TempDir()
+
+	// Add RMC that requires reboot AND includes a file to apply
+	// The file must be applied (not skipped) for reboot to be triggered
 	mcoClient.addRMC(&mcov1alpha1.RenderedMachineConfig{
 		ObjectMeta: metav1.ObjectMeta{Name: "new-rev"},
 		Spec: mcov1alpha1.RenderedMachineConfigSpec{
 			Config: mcov1alpha1.RenderedConfig{
-				Files:   []mcov1alpha1.FileSpec{},
+				Files: []mcov1alpha1.FileSpec{
+					{Path: "/etc/test-reboot.conf", Content: "reboot-test", State: "present"},
+				},
 				Systemd: mcov1alpha1.SystemdSpec{Units: []mcov1alpha1.UnitSpec{}},
 			},
 			Reboot: mcov1alpha1.RenderedRebootSpec{
@@ -441,8 +448,9 @@ func TestAgent_HandleNodeUpdate_RebootRequired(t *testing.T) {
 		},
 	})
 
-	// Use newTestAgent which includes rebootHandler
+	// Create agent with temp dir applier
 	agent := newTestAgent("test-node", k8sClient, mcoClient)
+	agent.applier = NewApplierWithOptions(tmpDir, NewMockConnection(), true)
 
 	err := agent.handleNodeUpdate(context.Background(), node)
 	if err != nil {
@@ -450,6 +458,128 @@ func TestAgent_HandleNodeUpdate_RebootRequired(t *testing.T) {
 	}
 
 	// Verify reboot-pending is set (strategy defaults to Never)
+	updated, _ := k8sClient.CoreV1().Nodes().Get(context.Background(), "test-node", metav1.GetOptions{})
+	if got := updated.Annotations[annotations.RebootPending]; got != "true" {
+		t.Errorf("RebootPending = %q, want %q", got, "true")
+	}
+
+	// Current revision should NOT be updated yet (waiting for reboot)
+	if got := updated.Annotations[annotations.CurrentRevision]; got == "new-rev" {
+		t.Error("CurrentRevision should not be updated before reboot")
+	}
+}
+
+// TestAgent_HandleNodeUpdate_NoChangesNoReboot verifies that when no files/units
+// are actually changed (idempotent apply), reboot is NOT triggered even if
+// reboot.required=true.
+func TestAgent_HandleNodeUpdate_NoChangesNoReboot(t *testing.T) {
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-node",
+			Annotations: map[string]string{
+				annotations.DesiredRevision: "new-rev",
+				// First apply: no current revision
+			},
+		},
+	}
+	k8sClient := fake.NewSimpleClientset(node)
+	mcoClient := newMockMCOClient()
+
+	// Use temp dir so file operations work
+	tmpDir := t.TempDir()
+
+	// Pre-create the file that the RMC will try to apply
+	// This makes the apply idempotent (no changes)
+	testFilePath := tmpDir + "/etc/already-exists.conf"
+	os.MkdirAll(tmpDir+"/etc", 0755)
+	os.WriteFile(testFilePath, []byte("existing-content"), 0644)
+
+	// Add RMC with reboot.required=true but file already exists with same content
+	mcoClient.addRMC(&mcov1alpha1.RenderedMachineConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "new-rev"},
+		Spec: mcov1alpha1.RenderedMachineConfigSpec{
+			Config: mcov1alpha1.RenderedConfig{
+				Files: []mcov1alpha1.FileSpec{
+					{Path: "/etc/already-exists.conf", Content: "existing-content", State: "present"},
+				},
+				Systemd: mcov1alpha1.SystemdSpec{Units: []mcov1alpha1.UnitSpec{}},
+			},
+			Reboot: mcov1alpha1.RenderedRebootSpec{
+				Required: true, // Would normally trigger reboot
+			},
+		},
+	})
+
+	// Create agent with temp dir applier
+	agent := newTestAgent("test-node", k8sClient, mcoClient)
+	agent.applier = NewApplierWithOptions(tmpDir, NewMockConnection(), true)
+
+	err := agent.handleNodeUpdate(context.Background(), node)
+	if err != nil {
+		t.Fatalf("handleNodeUpdate() error = %v", err)
+	}
+
+	// Verify reboot-pending is NOT set (no changes = no reboot)
+	updated, _ := k8sClient.CoreV1().Nodes().Get(context.Background(), "test-node", metav1.GetOptions{})
+	if got := updated.Annotations[annotations.RebootPending]; got == "true" {
+		t.Errorf("RebootPending = %q, want empty (no changes = no reboot)", got)
+	}
+
+	// Current revision SHOULD be updated (apply succeeded, no reboot needed)
+	if got := updated.Annotations[annotations.CurrentRevision]; got != "new-rev" {
+		t.Errorf("CurrentRevision = %q, want %q", got, "new-rev")
+	}
+
+	// State should be done
+	if got := updated.Annotations[annotations.AgentState]; got != annotations.StateDone {
+		t.Errorf("AgentState = %q, want %q", got, annotations.StateDone)
+	}
+}
+
+// TestAgent_HandleNodeUpdate_WithChangesReboot verifies that when files/units
+// ARE changed, reboot IS triggered if reboot.required=true.
+func TestAgent_HandleNodeUpdate_WithChangesReboot(t *testing.T) {
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-node",
+			Annotations: map[string]string{
+				annotations.DesiredRevision: "new-rev",
+				// First apply: no current revision
+			},
+		},
+	}
+	k8sClient := fake.NewSimpleClientset(node)
+	mcoClient := newMockMCOClient()
+
+	// Use temp dir so file operations work
+	tmpDir := t.TempDir()
+
+	// Add RMC with reboot.required=true and a NEW file (will be applied)
+	mcoClient.addRMC(&mcov1alpha1.RenderedMachineConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "new-rev"},
+		Spec: mcov1alpha1.RenderedMachineConfigSpec{
+			Config: mcov1alpha1.RenderedConfig{
+				Files: []mcov1alpha1.FileSpec{
+					{Path: "/etc/new-file.conf", Content: "new-content", State: "present"},
+				},
+				Systemd: mcov1alpha1.SystemdSpec{Units: []mcov1alpha1.UnitSpec{}},
+			},
+			Reboot: mcov1alpha1.RenderedRebootSpec{
+				Required: true,
+			},
+		},
+	})
+
+	// Create agent with temp dir applier
+	agent := newTestAgent("test-node", k8sClient, mcoClient)
+	agent.applier = NewApplierWithOptions(tmpDir, NewMockConnection(), true)
+
+	err := agent.handleNodeUpdate(context.Background(), node)
+	if err != nil {
+		t.Fatalf("handleNodeUpdate() error = %v", err)
+	}
+
+	// Verify reboot-pending IS set (changes were made)
 	updated, _ := k8sClient.CoreV1().Nodes().Get(context.Background(), "test-node", metav1.GetOptions{})
 	if got := updated.Annotations[annotations.RebootPending]; got != "true" {
 		t.Errorf("RebootPending = %q, want %q", got, "true")
@@ -469,7 +599,6 @@ func TestAgent_GetNodeName(t *testing.T) {
 }
 
 // TestAgent_FetchRMC tests the RMCFetcher interface implementation.
-// STORY-064: Tests for diff-based reboot RMC fetching.
 func TestAgent_FetchRMC_CacheHit(t *testing.T) {
 	k8sClient := fake.NewSimpleClientset()
 	mcoClient := newMockMCOClient()
@@ -570,5 +699,75 @@ func TestAgent_FetchRMC_APIError(t *testing.T) {
 	cached := agent.rmcCache.Get("some-rev")
 	if cached != nil {
 		t.Error("Expected RMC NOT to be cached after fetch error")
+	}
+}
+
+// TestAgent_ProcessNodeUpdateWithCancel_CancelsStaleUpdate tests that when
+// desired-revision changes, the previous in-flight update is canceled.
+func TestAgent_ProcessNodeUpdateWithCancel_CancelsStaleUpdate(t *testing.T) {
+	k8sClient := fake.NewSimpleClientset()
+	mcoClient := newMockMCOClient()
+
+	agent := newTestAgent("test-node", k8sClient, mcoClient)
+
+	// Node update with rev-v2 (simulates second update after rev-v1)
+	nodeV2 := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-node",
+			Annotations: map[string]string{
+				"mco.in-cloud.io/desired-revision": "rev-v2",
+			},
+		},
+	}
+
+	ctx := context.Background()
+
+	// Simulate first update starting (sets up cancel function)
+	agent.updateMu.Lock()
+	updateCtx, cancel := context.WithCancel(ctx)
+	agent.currentUpdateCancel = cancel
+	agent.currentDesiredRev = "rev-v1"
+	agent.currentUpdateID = 1
+	agent.updateMu.Unlock()
+
+	// Now process second update - should cancel the first
+	// We don't have rev-v2 RMC, so it will fail, but the cancellation should happen first
+	_ = agent.processNodeUpdateWithCancel(ctx, nodeV2)
+
+	// Verify the first context was canceled
+	select {
+	case <-updateCtx.Done():
+		// Expected - context was canceled
+		if updateCtx.Err() != context.Canceled {
+			t.Errorf("Expected context.Canceled, got %v", updateCtx.Err())
+		}
+	default:
+		t.Error("First update context should have been canceled")
+	}
+}
+
+// TestAgent_FetchRMCWithRetry_ContextCanceled tests that fetchRMCWithRetry
+// properly handles context cancellation.
+func TestAgent_FetchRMCWithRetry_ContextCanceled(t *testing.T) {
+	k8sClient := fake.NewSimpleClientset()
+	mcoClient := newMockMCOClient()
+	// Don't add RMC - it will keep retrying
+
+	agent := newTestAgent("test-node", k8sClient, mcoClient)
+
+	// Create a context we can cancel
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Cancel immediately
+	cancel()
+
+	// fetchRMCWithRetry should return context.Canceled error
+	_, err := agent.fetchRMCWithRetry(ctx, "missing-rmc")
+	if err == nil {
+		t.Fatal("Expected error from fetchRMCWithRetry with canceled context")
+	}
+
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Expected context.Canceled error, got: %v", err)
 	}
 }

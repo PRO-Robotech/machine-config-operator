@@ -1,248 +1,221 @@
-# Установка MCO Lite
+# Установка
 
-Это руководство описывает установку MCO Lite в Kubernetes кластер.
+Установка MCO Lite в Kubernetes кластер.
 
 ---
 
 ## Быстрая установка
 
-### Из исходников
-
 ```bash
-# Клонировать репозиторий
+# 1. Клонировать репозиторий
 git clone https://github.com/your-org/machine-config.git
 cd machine-config
 
-# Установить CRD
+# 2. Установить CRD
 make install
 
-# Собрать и загрузить образы
-make docker-build IMG=<your-registry>/mco-controller:latest
-make docker-push IMG=<your-registry>/mco-controller:latest
-
-# Развернуть оператор
+# 3. Развернуть оператор
 make deploy IMG=<your-registry>/mco-controller:latest
 ```
 
-### Проверка установки
+---
+
+## Пошаговая установка
+
+### 1. Установка CRD
 
 ```bash
-# Проверить CRD
+# Из репозитория
+make install
+
+# Или вручную
+kubectl apply -f config/crd/bases/
+```
+
+**Проверка:**
+```bash
 kubectl get crd | grep mco
+# mco.in-cloud.io_machineconfigs.mco.in-cloud.io
+# mco.in-cloud.io_machineconfigpools.mco.in-cloud.io
+# mco.in-cloud.io_renderedmachineconfigs.mco.in-cloud.io
+```
 
-# Ожидаемый вывод:
-# machineconfigs.mco.in-cloud.io
-# machineconfigpools.mco.in-cloud.io
-# renderedmachineconfigs.mco.in-cloud.io
+### 2. Сборка образов
 
-# Проверить Controller
-kubectl get pods -n mco-system
+```bash
+# Controller
+docker build -t <registry>/mco-controller:latest -f Dockerfile.controller .
+docker push <registry>/mco-controller:latest
 
-# Ожидаемый вывод:
-# NAME                              READY   STATUS    RESTARTS   AGE
-# mco-controller-5d8f9c7b4f-xxxxx   1/1     Running   0          1m
+# Agent
+docker build -t <registry>/mco-agent:latest -f Dockerfile.agent .
+docker push <registry>/mco-agent:latest
+```
 
-# Проверить Agent (DaemonSet)
-kubectl get ds -n mco-system
+### 3. Развёртывание
 
-# Ожидаемый вывод:
-# NAME        DESIRED   CURRENT   READY   AGE
-# mco-agent   3         3         3       1m
+```bash
+# С make
+make deploy \
+  CONTROLLER_IMG=<registry>/mco-controller:latest \
+  AGENT_IMG=<registry>/mco-agent:latest
+
+# Или с kustomize
+cd config/default
+kustomize edit set image controller=<registry>/mco-controller:latest
+kustomize edit set image agent=<registry>/mco-agent:latest
+kustomize build | kubectl apply -f -
+```
+
+**Проверка:**
+```bash
+# Controller
+kubectl get deployment -n mco-system mco-controller
+kubectl get pod -n mco-system -l control-plane=controller-manager
+
+# Agent
+kubectl get daemonset -n mco-system mco-agent
+kubectl get pod -n mco-system -l app=mco-agent
 ```
 
 ---
 
 ## Установка в minikube
 
-### Подготовка
-
 ```bash
-# Запустить minikube (если не запущен)
-minikube start --driver=docker --cpus=2 --memory=4096
+# 1. Запустить minikube с несколькими нодами
+minikube start --nodes 3
 
-# Переключить docker на minikube
-eval $(minikube docker-env)
-```
-
-### Сборка и установка
-
-```bash
-# Установить CRD
+# 2. Установить CRD
 make install
 
-# Собрать образы в minikube
-make docker-build IMG=mco-controller:latest
+# 3. Собрать образы внутри minikube
+eval $(minikube docker-env)
+make docker-build-controller IMG=mco-controller:local
+make docker-build-agent IMG=mco-agent:local
 
-# Развернуть (с imagePullPolicy: Never для локальных образов)
-make deploy IMG=mco-controller:latest
-```
-
-### Проверка
-
-```bash
-# Все поды должны быть Running
-kubectl get pods -n mco-system -w
-
-# Логи Controller
-kubectl logs -n mco-system deployment/mco-controller -f
-
-# Логи Agent на первой ноде
-kubectl logs -n mco-system -l app=mco-agent --tail=50
+# 4. Развернуть с imagePullPolicy: Never
+make deploy IMG=mco-controller:local AGENT_IMG=mco-agent:local
 ```
 
 ---
 
-## Установка в production
-
-### Требования
-
-- Container Registry для хранения образов
-- Namespace `mco-system` (создаётся автоматически)
-- RBAC настроен (создаётся автоматически)
-
-### Шаг 1: Сборка образов
+## Установка в Kind
 
 ```bash
-# Собрать и загрузить образы в ваш registry
-export IMG=registry.example.com/mco/controller:v0.1.0
-make docker-build docker-push IMG=$IMG
-```
+# 1. Создать Kind кластер
+make kind-create
 
-### Шаг 2: Установка CRD
+# 2. Собрать и загрузить образы
+make docker-build-controller IMG=mco-controller:e2e
+make docker-build-agent IMG=mco-agent:e2e
+kind load docker-image mco-controller:e2e
+kind load docker-image mco-agent:e2e
 
-```bash
+# 3. Установить и развернуть
 make install
-```
-
-> **Важно:** CRD устанавливаются отдельно от оператора.
-> Это позволяет обновлять оператор без потери данных.
-
-### Шаг 3: Деплой оператора
-
-```bash
-make deploy IMG=$IMG
-```
-
-### Шаг 4: Проверка
-
-```bash
-# Все компоненты должны быть готовы
-kubectl get pods -n mco-system
-
-# Проверить логи на ошибки
-kubectl logs -n mco-system deployment/mco-controller | grep -i error
+make deploy-e2e
 ```
 
 ---
 
 ## Конфигурация
 
-### Параметры Controller
+### Controller параметры
 
-Controller настраивается через аргументы командной строки:
+Можно настроить через аргументы командной строки:
 
-| Аргумент | По умолчанию | Описание |
-|----------|--------------|----------|
-| `--leader-elect` | true | Включить leader election |
-| `--metrics-bind-address` | :8080 | Адрес для метрик |
-| `--health-probe-bind-address` | :8081 | Адрес для health probes |
-
-### Параметры Agent
-
-Agent настраивается через environment variables:
-
-| Переменная | По умолчанию | Описание |
-|------------|--------------|----------|
-| `NODE_NAME` | (из downward API) | Имя ноды |
-| `LOG_LEVEL` | info | Уровень логирования |
-
----
-
-## Удаление
-
-### Удалить оператор (сохранить CRD и данные)
-
-```bash
-make undeploy
+```yaml
+# config/manager/manager.yaml
+spec:
+  containers:
+    - name: manager
+      args:
+        - --leader-elect              # Leader election
+        - --health-probe-bind-address=:8081
 ```
 
-### Полное удаление (включая CRD и все данные)
+### Agent параметры
 
-```bash
-# Удалить все MachineConfig, MachineConfigPool, RenderedMachineConfig
-kubectl delete mc --all
-kubectl delete mcp --all
-kubectl delete rmc --all
-
-# Удалить оператор
-make undeploy
-
-# Удалить CRD
-make uninstall
+```yaml
+# config/agent/daemonset.yaml
+spec:
+  containers:
+    - name: agent
+      args:
+        - --host-root=/host           # Точка монтирования хоста
 ```
 
-> **Внимание:** Удаление CRD удалит все созданные ресурсы!
+### Namespace
+
+По умолчанию MCO Lite устанавливается в namespace `mco-system`.
+
+Для изменения:
+```bash
+cd config/default
+kustomize edit set namespace my-namespace
+```
 
 ---
 
 ## Обновление
 
-### Обновление оператора
+### Controller
 
 ```bash
-# Собрать новую версию
-export IMG=registry.example.com/mco/controller:v0.2.0
-make docker-build docker-push IMG=$IMG
+# Обновить образ
+kubectl set image deployment/mco-controller \
+  -n mco-system \
+  manager=<registry>/mco-controller:new-version
 
-# Обновить деплой
-make deploy IMG=$IMG
+# Или через make
+make deploy IMG=<registry>/mco-controller:new-version
 ```
 
-### Обновление CRD
+### Agent
 
 ```bash
-# Применить новые CRD
-make install
+# Обновить образ в DaemonSet
+kubectl set image daemonset/mco-agent \
+  -n mco-system \
+  agent=<registry>/mco-agent:new-version
+```
 
-# Перезапустить оператор для подхвата изменений
-kubectl rollout restart deployment/mco-controller -n mco-system
+### CRD
+
+```bash
+# При изменении CRD
+make install
 ```
 
 ---
 
-## Устранение проблем установки
-
-### CRD не создаются
+## Удаление
 
 ```bash
-# Проверить права
-kubectl auth can-i create crd
-# Должно вернуть "yes"
+# Удалить развёртывание
+make undeploy
 
-# Проверить ошибки
-kubectl get crd machineconfigs.mco.in-cloud.io -o yaml
+# Удалить CRD (ВНИМАНИЕ: удалит все MC, MCP, RMC!)
+make uninstall
 ```
 
-### Controller не запускается
+---
+
+## Проверка установки
 
 ```bash
-# Посмотреть события
-kubectl describe pod -n mco-system -l control-plane=controller-manager
+# 1. Компоненты запущены
+kubectl get pods -n mco-system
 
-# Частые причины:
-# - ImagePullBackOff: неверный образ или нет доступа к registry
-# - CrashLoopBackOff: ошибка в конфигурации
-```
+# 2. CRD доступны
+kubectl api-resources | grep mco
 
-### Agent не запускается
+# 3. RBAC настроен
+kubectl auth can-i get machineconfigs --as=system:serviceaccount:mco-system:mco-controller-manager
 
-```bash
-# Посмотреть статус DaemonSet
-kubectl describe ds mco-agent -n mco-system
-
-# Частые причины:
-# - Нет прав на доступ к hostPath
-# - Нет прав на работу с systemd (требуется privileged)
+# 4. Логи без ошибок
+kubectl logs -n mco-system deployment/mco-controller --tail=50
 ```
 
 ---
@@ -250,4 +223,5 @@ kubectl describe ds mco-agent -n mco-system
 ## Следующие шаги
 
 - [Быстрый старт](quickstart.md) — создать первую конфигурацию
-- [MachineConfig](../user-guide/machineconfig.md) — подробное руководство
+- [MachineConfigPool](../user-guide/machineconfigpool.md) — настроить пулы
+

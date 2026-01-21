@@ -12,7 +12,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"in-cloud.io/machine-config/pkg/annotations"
+	"in-cloud.io/machine-config/pkg/drain"
 )
+
+// testMCONamespace is the MCO namespace used in tests.
+const testMCONamespace = "machine-config-system"
 
 func TestFilterEvictablePods_SkipsCompletedPods(t *testing.T) {
 	pods := []corev1.Pod{
@@ -30,7 +34,7 @@ func TestFilterEvictablePods_SkipsCompletedPods(t *testing.T) {
 		},
 	}
 
-	result := FilterEvictablePods(pods, DrainConfig{DeleteOrphans: true})
+	result := FilterEvictablePods(pods, DrainOptions{DeleteOrphans: true}, testMCONamespace)
 
 	if len(result) != 1 {
 		t.Fatalf("expected 1 pod, got %d", len(result))
@@ -55,7 +59,7 @@ func TestFilterEvictablePods_SkipsMirrorPods(t *testing.T) {
 		},
 	}
 
-	result := FilterEvictablePods(pods, DrainConfig{DeleteOrphans: true})
+	result := FilterEvictablePods(pods, DrainOptions{DeleteOrphans: true}, testMCONamespace)
 
 	if len(result) != 1 {
 		t.Fatalf("expected 1 pod, got %d", len(result))
@@ -88,7 +92,7 @@ func TestFilterEvictablePods_SkipsDaemonSetPods(t *testing.T) {
 		},
 	}
 
-	result := FilterEvictablePods(pods, DrainConfig{IgnoreDS: true, DeleteOrphans: true})
+	result := FilterEvictablePods(pods, DrainOptions{IgnoreDS: true, DeleteOrphans: true}, testMCONamespace)
 
 	if len(result) != 1 {
 		t.Fatalf("expected 1 pod, got %d", len(result))
@@ -112,7 +116,7 @@ func TestFilterEvictablePods_IncludesDaemonSetPodsWhenNotIgnored(t *testing.T) {
 		},
 	}
 
-	result := FilterEvictablePods(pods, DrainConfig{IgnoreDS: false, DeleteOrphans: true})
+	result := FilterEvictablePods(pods, DrainOptions{IgnoreDS: false, DeleteOrphans: true}, testMCONamespace)
 
 	if len(result) != 1 {
 		t.Fatalf("expected 1 pod, got %d", len(result))
@@ -127,7 +131,7 @@ func TestFilterEvictablePods_SkipsOrphanPods(t *testing.T) {
 		},
 	}
 
-	result := FilterEvictablePods(pods, DrainConfig{DeleteOrphans: false})
+	result := FilterEvictablePods(pods, DrainOptions{DeleteOrphans: false}, testMCONamespace)
 
 	if len(result) != 0 {
 		t.Fatalf("expected 0 pods, got %d", len(result))
@@ -142,7 +146,89 @@ func TestFilterEvictablePods_IncludesOrphanPodsWhenAllowed(t *testing.T) {
 		},
 	}
 
-	result := FilterEvictablePods(pods, DrainConfig{DeleteOrphans: true})
+	result := FilterEvictablePods(pods, DrainOptions{DeleteOrphans: true}, testMCONamespace)
+
+	if len(result) != 1 {
+		t.Fatalf("expected 1 pod, got %d", len(result))
+	}
+}
+
+func TestFilterEvictablePodsWithExclusions_SkipsByRule(t *testing.T) {
+	pods := []corev1.Pod{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "nginx", Namespace: "default"},
+			Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "netshoot-abc", Namespace: "default"},
+			Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "coredns", Namespace: "kube-system"},
+			Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+		},
+	}
+
+	exclusions := &drain.DrainConfig{
+		Rules: []drain.Rule{
+			{Namespaces: []string{"kube-system"}},
+			{PodNamePatterns: []string{"netshoot-*"}},
+		},
+	}
+
+	result := FilterEvictablePodsWithExclusions(pods, DrainOptions{DeleteOrphans: true}, exclusions, testMCONamespace)
+
+	if len(result) != 1 {
+		t.Fatalf("expected 1 pod (nginx), got %d", len(result))
+	}
+	if result[0].Name != "nginx" {
+		t.Errorf("expected nginx, got %s", result[0].Name)
+	}
+}
+
+func TestFilterEvictablePodsWithExclusions_SkipsToleratAll(t *testing.T) {
+	pods := []corev1.Pod{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "nginx", Namespace: "default"},
+			Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "netshoot", Namespace: "default"},
+			Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+			Spec: corev1.PodSpec{
+				Tolerations: []corev1.Toleration{
+					{Operator: corev1.TolerationOpExists},
+				},
+			},
+		},
+	}
+
+	exclusions := &drain.DrainConfig{
+		Defaults: drain.Defaults{
+			SkipToleratAllPods: true,
+		},
+	}
+
+	result := FilterEvictablePodsWithExclusions(pods, DrainOptions{DeleteOrphans: true}, exclusions, testMCONamespace)
+
+	if len(result) != 1 {
+		t.Fatalf("expected 1 pod (nginx), got %d", len(result))
+	}
+	if result[0].Name != "nginx" {
+		t.Errorf("expected nginx, got %s", result[0].Name)
+	}
+}
+
+func TestFilterEvictablePodsWithExclusions_NilExclusions(t *testing.T) {
+	pods := []corev1.Pod{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "nginx", Namespace: "default"},
+			Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+		},
+	}
+
+	// nil exclusions should work (no exclusions applied)
+	result := FilterEvictablePodsWithExclusions(pods, DrainOptions{DeleteOrphans: true}, nil, testMCONamespace)
 
 	if len(result) != 1 {
 		t.Fatalf("expected 1 pod, got %d", len(result))
@@ -680,7 +766,7 @@ func TestIsDrainComplete_NoPods(t *testing.T) {
 		Build()
 	ctx := context.Background()
 
-	complete, err := IsDrainComplete(ctx, c, node, DrainConfig{IgnoreDS: true, DeleteOrphans: true})
+	complete, err := IsDrainComplete(ctx, c, node, DrainOptions{IgnoreDS: true, DeleteOrphans: true}, testMCONamespace)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -713,7 +799,7 @@ func TestIsDrainComplete_WithEvictablePods(t *testing.T) {
 		Build()
 	ctx := context.Background()
 
-	complete, err := IsDrainComplete(ctx, c, node, DrainConfig{IgnoreDS: true, DeleteOrphans: true})
+	complete, err := IsDrainComplete(ctx, c, node, DrainOptions{IgnoreDS: true, DeleteOrphans: true}, testMCONamespace)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -753,7 +839,7 @@ func TestIsDrainComplete_OnlyDaemonSetPods(t *testing.T) {
 		Build()
 	ctx := context.Background()
 
-	complete, err := IsDrainComplete(ctx, c, node, DrainConfig{IgnoreDS: true, DeleteOrphans: true})
+	complete, err := IsDrainComplete(ctx, c, node, DrainOptions{IgnoreDS: true, DeleteOrphans: true}, testMCONamespace)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -767,10 +853,10 @@ func TestIsMCOPod_ByNamespace(t *testing.T) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "some-pod",
-			Namespace: MCONamespace,
+			Namespace: testMCONamespace,
 		},
 	}
-	if !isMCOPod(pod) {
+	if !isMCOPod(pod, testMCONamespace) {
 		t.Error("pod in MCO namespace should be identified as MCO pod")
 	}
 }
@@ -787,7 +873,7 @@ func TestIsMCOPod_ByLabels(t *testing.T) {
 			},
 		},
 	}
-	if !isMCOPod(pod) {
+	if !isMCOPod(pod, testMCONamespace) {
 		t.Error("pod with MCO labels should be identified via fallback")
 	}
 }
@@ -803,7 +889,7 @@ func TestIsMCOPod_OtherPod(t *testing.T) {
 			},
 		},
 	}
-	if isMCOPod(pod) {
+	if isMCOPod(pod, testMCONamespace) {
 		t.Error("regular pod should not be identified as MCO pod")
 	}
 }
@@ -856,7 +942,7 @@ func TestIsMCOPod_PartialLabels(t *testing.T) {
 					Labels:    tt.labels,
 				},
 			}
-			if got := isMCOPod(pod); got != tt.want {
+			if got := isMCOPod(pod, testMCONamespace); got != tt.want {
 				t.Errorf("isMCOPod() = %v, want %v", got, tt.want)
 			}
 		})
@@ -869,7 +955,7 @@ func TestFilterEvictablePods_ExcludesMCOByNamespace(t *testing.T) {
 		{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "controller-manager-abc",
-				Namespace: MCONamespace,
+				Namespace: testMCONamespace,
 			},
 			Status: corev1.PodStatus{Phase: corev1.PodRunning},
 		},
@@ -882,7 +968,7 @@ func TestFilterEvictablePods_ExcludesMCOByNamespace(t *testing.T) {
 		},
 	}
 
-	result := FilterEvictablePods(pods, DrainConfig{DeleteOrphans: true})
+	result := FilterEvictablePods(pods, DrainOptions{DeleteOrphans: true}, testMCONamespace)
 
 	if len(result) != 1 {
 		t.Errorf("expected 1 evictable pod, got %d", len(result))
@@ -915,7 +1001,7 @@ func TestFilterEvictablePods_ExcludesMCOByLabel(t *testing.T) {
 		},
 	}
 
-	result := FilterEvictablePods(pods, DrainConfig{DeleteOrphans: true})
+	result := FilterEvictablePods(pods, DrainOptions{DeleteOrphans: true}, testMCONamespace)
 
 	if len(result) != 1 {
 		t.Errorf("expected 1 evictable pod, got %d", len(result))
@@ -932,7 +1018,7 @@ func TestFilterEvictablePods_ExcludesMCOMixed(t *testing.T) {
 		{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "controller-manager-abc",
-				Namespace: MCONamespace,
+				Namespace: testMCONamespace,
 			},
 			Status: corev1.PodStatus{Phase: corev1.PodRunning},
 		},
@@ -940,7 +1026,7 @@ func TestFilterEvictablePods_ExcludesMCOMixed(t *testing.T) {
 		{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "agent-xyz",
-				Namespace: MCONamespace,
+				Namespace: testMCONamespace,
 			},
 			Status: corev1.PodStatus{Phase: corev1.PodRunning},
 		},
@@ -962,7 +1048,7 @@ func TestFilterEvictablePods_ExcludesMCOMixed(t *testing.T) {
 		},
 	}
 
-	result := FilterEvictablePods(pods, DrainConfig{DeleteOrphans: true})
+	result := FilterEvictablePods(pods, DrainOptions{DeleteOrphans: true}, testMCONamespace)
 
 	if len(result) != 2 {
 		t.Errorf("expected 2 evictable pods, got %d", len(result))

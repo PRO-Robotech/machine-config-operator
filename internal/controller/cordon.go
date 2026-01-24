@@ -73,15 +73,22 @@ func IsNodeCordoned(node *corev1.Node) bool {
 	return annotations.GetBoolAnnotation(node.Annotations, annotations.Cordoned)
 }
 
+// ShouldUncordon returns true if node should be uncordoned.
+//
+// Condition: Node is cordoned AND current revision matches target.
+// Agent state is NOT checked because when revisions already match,
+// agent may stay in "idle" state (nothing to apply). The key indicator
+// that the node is ready is the revision match, not the agent state.
 func ShouldUncordon(node *corev1.Node, targetRevision string) bool {
 	if !IsNodeCordoned(node) {
 		return false
 	}
 
 	current := annotations.GetAnnotation(node.Annotations, annotations.CurrentRevision)
-	state := annotations.GetAnnotation(node.Annotations, annotations.AgentState)
 
-	return current == targetRevision && state == annotations.StateDone
+	// Only check revision match - agent state is not relevant
+	// once the node has reached the target revision
+	return current == targetRevision
 }
 
 func SetNodeAnnotation(ctx context.Context, c client.Client, node *corev1.Node, key, value string) error {

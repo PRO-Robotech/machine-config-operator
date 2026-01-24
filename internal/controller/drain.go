@@ -14,9 +14,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"in-cloud.io/machine-config/pkg/annotations"
+	"in-cloud.io/machine-config/pkg/drain"
 )
 
-type DrainConfig struct {
+type DrainOptions struct {
 	GracePeriod   int64
 	IgnoreDS      bool
 	DeleteOrphans bool
@@ -31,7 +32,11 @@ func (e *PDBBlockedError) Error() string {
 	return fmt.Sprintf("PDB blocked eviction of pod %s: %v", e.Pod, e.Err)
 }
 
-func DrainNode(ctx context.Context, c client.Client, node *corev1.Node, config DrainConfig) error {
+func DrainNode(ctx context.Context, c client.Client, node *corev1.Node, config DrainOptions, mcoNamespace string) error {
+	return DrainNodeWithExclusions(ctx, c, node, config, nil, mcoNamespace)
+}
+
+func DrainNodeWithExclusions(ctx context.Context, c client.Client, node *corev1.Node, config DrainOptions, exclusions *drain.DrainConfig, mcoNamespace string) error {
 	logger := log.FromContext(ctx)
 
 	if annotations.GetAnnotation(node.Annotations, annotations.DrainStartedAt) == "" {
@@ -46,7 +51,7 @@ func DrainNode(ctx context.Context, c client.Client, node *corev1.Node, config D
 		return fmt.Errorf("failed to list pods on node %s: %w", node.Name, err)
 	}
 
-	evictable := FilterEvictablePods(podList.Items, config)
+	evictable := FilterEvictablePodsWithExclusions(podList.Items, config, exclusions, mcoNamespace)
 	if len(evictable) == 0 {
 		logger.Info("drain complete, no pods to evict", "node", node.Name)
 		return nil
@@ -70,13 +75,17 @@ func DrainNode(ctx context.Context, c client.Client, node *corev1.Node, config D
 	return nil
 }
 
-func FilterEvictablePods(pods []corev1.Pod, config DrainConfig) []corev1.Pod {
+func FilterEvictablePods(pods []corev1.Pod, config DrainOptions, mcoNamespace string) []corev1.Pod {
+	return FilterEvictablePodsWithExclusions(pods, config, nil, mcoNamespace)
+}
+
+func FilterEvictablePodsWithExclusions(pods []corev1.Pod, config DrainOptions, exclusions *drain.DrainConfig, mcoNamespace string) []corev1.Pod {
 	result := make([]corev1.Pod, 0, len(pods))
 
-	for _, pod := range pods {
-		// If a pod is already terminating, treat it as effectively drained.
-		// In envtest (no kubelet), pods may remain with a DeletionTimestamp for a while,
-		// and repeatedly trying to evict them would prevent progress.
+	for i := range pods {
+		pod := &pods[i]
+
+		// Skip terminating pods
 		if pod.DeletionTimestamp != nil {
 			continue
 		}
@@ -89,20 +98,25 @@ func FilterEvictablePods(pods []corev1.Pod, config DrainConfig) []corev1.Pod {
 			continue
 		}
 
-		if config.IgnoreDS && IsDaemonSetPod(&pod) {
+		if config.IgnoreDS && IsDaemonSetPod(pod) {
 			continue
 		}
 
-		// Skip MCO's own pods to prevent self-eviction
-		if isMCOPod(&pod) {
+		if isMCOPod(pod, mcoNamespace) {
 			continue
 		}
 
-		if !config.DeleteOrphans && !HasController(&pod) {
+		if !config.DeleteOrphans && !HasController(pod) {
 			continue
 		}
 
-		result = append(result, pod)
+		if exclusions != nil {
+			if skip, _ := exclusions.ShouldSkipPod(pod); skip {
+				continue
+			}
+		}
+
+		result = append(result, *pod)
 	}
 
 	return result
@@ -154,13 +168,17 @@ func EvictPod(ctx context.Context, c client.Client, pod *corev1.Pod, gracePeriod
 	return nil
 }
 
-func IsDrainComplete(ctx context.Context, c client.Client, node *corev1.Node, config DrainConfig) (bool, error) {
+func IsDrainComplete(ctx context.Context, c client.Client, node *corev1.Node, config DrainOptions, mcoNamespace string) (bool, error) {
+	return IsDrainCompleteWithExclusions(ctx, c, node, config, nil, mcoNamespace)
+}
+
+func IsDrainCompleteWithExclusions(ctx context.Context, c client.Client, node *corev1.Node, config DrainOptions, exclusions *drain.DrainConfig, mcoNamespace string) (bool, error) {
 	podList := &corev1.PodList{}
 	if err := c.List(ctx, podList, client.MatchingFields{"spec.nodeName": node.Name}); err != nil {
 		return false, err
 	}
 
-	evictable := FilterEvictablePods(podList.Items, config)
+	evictable := FilterEvictablePodsWithExclusions(podList.Items, config, exclusions, mcoNamespace)
 	return len(evictable) == 0, nil
 }
 
@@ -169,35 +187,24 @@ type DrainRetryResult struct {
 	SetDrainStuck bool
 }
 
-// DefaultDrainTimeoutSeconds is the default drain timeout (1 hour).
-const DefaultDrainTimeoutSeconds = 3600
-
-// DefaultDrainRetrySeconds is the minimum drain retry interval (30 seconds).
-const DefaultDrainRetrySeconds = 30
-
-// MCONamespace is the namespace where MCO components run.
-// Pods in this namespace are excluded from eviction to prevent self-disruption.
-const MCONamespace = "machine-config-system"
-
-// MCO labels used for fallback identification when namespace differs.
 const (
-	LabelAppName      = "app.kubernetes.io/name"
-	LabelControlPlane = "control-plane"
+	DefaultDrainTimeoutSeconds = 3600
+	DefaultDrainRetrySeconds   = 30
+)
 
-	// Label values for MCO controller
+const (
+	LabelAppName         = "app.kubernetes.io/name"
+	LabelControlPlane    = "control-plane"
 	MCOAppName           = "machine-config"
 	MCOControllerManager = "controller-manager"
 )
 
-// isMCOPod checks if a pod belongs to MCO and should be excluded from eviction.
-// Uses namespace as primary check, labels as fallback for robustness.
-func isMCOPod(pod *corev1.Pod) bool {
-	if pod.Namespace == MCONamespace {
+func isMCOPod(pod *corev1.Pod, mcoNamespace string) bool {
+	if pod.Namespace == mcoNamespace {
 		return true
 	}
 
-	// Fallback: check by labels (in case namespace differs or pod is misconfigured)
-	// Controller has: app.kubernetes.io/name=machine-config, control-plane=controller-manager
+	// Fallback by labels if namespace differs
 	if pod.Labels != nil &&
 		pod.Labels[LabelAppName] == MCOAppName &&
 		pod.Labels[LabelControlPlane] == MCOControllerManager {
@@ -207,15 +214,9 @@ func isMCOPod(pod *corev1.Pod) bool {
 	return false
 }
 
-// HandleDrainRetry manages drain retry logic and determines if drain is stuck.
-// drainTimeoutSeconds specifies the maximum time before marking drain as stuck.
-// drainRetrySeconds specifies the interval between retry attempts.
-// If drainTimeoutSeconds is 0, DefaultDrainTimeoutSeconds (3600) is used.
-// If drainRetrySeconds is 0, it is calculated as max(30, drainTimeoutSeconds/12).
 func HandleDrainRetry(ctx context.Context, c client.Client, node *corev1.Node, drainTimeoutSeconds, drainRetrySeconds int) DrainRetryResult {
 	drainStartStr := annotations.GetAnnotation(node.Annotations, annotations.DrainStartedAt)
 	if drainStartStr == "" {
-		// First retry - use configured interval or default
 		retryInterval := calculateRetryInterval(drainTimeoutSeconds, drainRetrySeconds)
 		return DrainRetryResult{RequeueAfter: retryInterval, SetDrainStuck: false}
 	}
@@ -231,48 +232,33 @@ func HandleDrainRetry(ctx context.Context, c client.Client, node *corev1.Node, d
 	retryCount := GetIntAnnotation(node, annotations.DrainRetryCount) + 1
 	_ = SetNodeAnnotation(ctx, c, node, annotations.DrainRetryCount, strconv.Itoa(retryCount))
 
-	// Use default timeout if not specified
 	if drainTimeoutSeconds <= 0 {
 		drainTimeoutSeconds = DefaultDrainTimeoutSeconds
 	}
 	drainTimeout := time.Duration(drainTimeoutSeconds) * time.Second
 
-	// Calculate retry interval (configurable or auto-calculated)
 	retryInterval := calculateRetryInterval(drainTimeoutSeconds, drainRetrySeconds)
 
 	if elapsed >= drainTimeout {
 		return DrainRetryResult{RequeueAfter: retryInterval, SetDrainStuck: true}
 	}
 
-	// Cap requeue to remaining time to avoid overshooting timeout
 	remaining := drainTimeout - elapsed
-	requeue := retryInterval
-	if remaining < requeue {
-		requeue = remaining
-	}
-	if requeue < 10*time.Second {
-		requeue = 10 * time.Second // Minimum 10s to avoid busy-looping
-	}
+	requeue := min(retryInterval, remaining)
+	requeue = max(requeue, 10*time.Second)
 
 	return DrainRetryResult{RequeueAfter: requeue, SetDrainStuck: false}
 }
 
-// calculateRetryInterval returns the drain retry interval.
-// If drainRetrySeconds is specified (> 0), it is used directly.
-// Otherwise, it is calculated as max(30, drainTimeoutSeconds/12).
 func calculateRetryInterval(drainTimeoutSeconds, drainRetrySeconds int) time.Duration {
 	if drainRetrySeconds > 0 {
 		return time.Duration(drainRetrySeconds) * time.Second
 	}
 
-	// Auto-calculate: ~12 retries before timeout
 	if drainTimeoutSeconds <= 0 {
 		drainTimeoutSeconds = DefaultDrainTimeoutSeconds
 	}
-	calculated := drainTimeoutSeconds / 12
-	if calculated < DefaultDrainRetrySeconds {
-		calculated = DefaultDrainRetrySeconds
-	}
+	calculated := max(drainTimeoutSeconds/12, DefaultDrainRetrySeconds)
 	return time.Duration(calculated) * time.Second
 }
 

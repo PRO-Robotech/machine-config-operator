@@ -128,6 +128,70 @@ spec:
 | DaemonSet pods | Будут пересозданы автоматически |
 | Static pods | Определены в манифестах на ноде |
 
+### Конфигурируемые исключения (ConfigMap)
+
+Помимо встроенных исключений, можно настроить дополнительные правила через ConfigMap.
+
+#### Создание ConfigMap
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mco-drain-config
+  namespace: mco-system
+  labels:
+    mco.in-cloud.io/drain-config: "true"  # Обязательный label для discovery
+data:
+  config.yaml: |
+    defaults:
+      # Пропускать поды с tolerations: [{operator: Exists}]
+      skipToleratAllPods: true
+
+    rules:
+      # Пропустить все поды в kube-system
+      - namespaces:
+          - kube-system
+
+      # Пропустить поды с prefix namespace
+      - namespacePrefixes:
+          - "monitoring-"
+
+      # Пропустить поды по имени (glob pattern)
+      - podNamePatterns:
+          - "debug-*"
+          - "netshoot-*"
+
+      # Пропустить поды по label
+      - podSelector:
+          matchLabels:
+            mco.in-cloud.io/skip-drain: "true"
+```
+
+#### Логика правил
+
+| Уровень | Логика | Пример |
+|---------|--------|--------|
+| Между правилами | **OR** | Правило 1 ИЛИ Правило 2 |
+| Внутри правила | **AND** | namespace=X И podSelector=Y |
+
+#### Типы правил
+
+| Правило | Описание | Пример |
+|---------|----------|--------|
+| `namespaces` | Точное совпадение namespace | `["kube-system", "default"]` |
+| `namespacePrefixes` | Prefix namespace | `["monitoring-", "test-"]` |
+| `podNamePatterns` | Glob pattern имени пода | `["debug-*", "test-?-pod"]` |
+| `podSelector` | Label selector | `matchLabels: {app: critical}` |
+
+#### Применение
+
+```bash
+kubectl apply -f config/samples/mco-drain-config.yaml
+```
+
+ConfigMap подхватывается автоматически при следующем drain цикле.
+
 ### События при Drain
 
 При начале drain эмитятся события типа **Warning** (деструктивные действия):
@@ -181,7 +245,7 @@ kubectl get mcp <pool> -o jsonpath='{.status.conditions[?(@.type=="DrainStuck")]
 
 ### Что происходит
 
-После успешного применения конфигурации (`agent-state = done`):
+После применения конфигурации (когда `current-revision` совпадает с `desired-revision`):
 
 1. Controller снимает `unschedulable`:
    ```yaml
@@ -197,8 +261,11 @@ kubectl get mcp <pool> -o jsonpath='{.status.conditions[?(@.type=="DrainStuck")]
 ### Условия Uncordon
 
 Нода uncordon только когда:
-- `current-revision == desired-revision`
-- `agent-state == done`
+- `current-revision == desired-revision` — revision match означает, что конфиг применён
+
+> **Примечание:** Agent state (`idle`, `applying`, `done`) **не проверяется** для uncordon.
+> Это важно, потому что agent пишет `current-revision` только после успешного apply.
+> Если revision совпадает — конфиг гарантированно применён.
 
 ### Проверка
 

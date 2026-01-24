@@ -7,6 +7,35 @@
 
 ---
 
+## [0.1.3] - 2026-01-21
+
+### Summary
+
+Релиз добавляет конфигурируемые исключения из drain через ConfigMap и исправляет критический баг с uncordon нод.
+
+### Добавлено
+
+- **Drain Exclusions via ConfigMap** — гибкое управление исключениями из drain
+  - ConfigMap с label `mco.in-cloud.io/drain-config=true` для конфигурации
+  - Правила исключения по namespace, namespacePrefix, podNamePattern, podSelector
+  - Опция `defaults.skipToleratAllPods` для пропуска подов с tolerations: [{operator: Exists}]
+  - OR-логика между правилами, AND-логика внутри правила
+  - Sample ConfigMap: `config/samples/mco-drain-config.yaml`
+
+### Исправлено
+
+- **Нода остаётся cordoned при idle агенте** — исправлена логика uncordon
+  - Uncordon теперь проверяет **только** совпадение revision (`current-revision == desired-revision`)
+  - Agent state (`idle`, `applying`, `done`) больше не влияет на решение uncordon
+  - Решает проблему deadlock когда нода оставалась cordoned навсегда при `agent-state=idle`
+
+### Документация
+
+- Добавлена документация по конфигурации Drain Exclusions
+- Обновлены условия uncordon
+
+---
+
 ## [0.1.2] - 2026-01-11
 
 ### Summary

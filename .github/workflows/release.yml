@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get version from tag
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Extract release notes from CHANGELOG
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          awk -v ver="$VERSION" '
+            /^## \[/ {
+              if (found) exit
+              if (index($0, "[" ver "]")) { found=1; next }
+            }
+            /^---$/ { if (found) exit }
+            found { print }
+          ' docs/CHANGELOG.md > release_notes.md
+
+          if [ ! -s release_notes.md ]; then
+            echo "WARNING: No release notes found for version $VERSION"
+            echo "Release created from tag $VERSION" > release_notes.md
+          fi
+
+          echo "=== Release notes ==="
+          cat release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release_notes.md
+          generate_release_notes: false

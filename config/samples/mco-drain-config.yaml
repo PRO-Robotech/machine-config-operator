@@ -1,0 +1,57 @@
+# Sample MCO Drain Configuration ConfigMap
+# This ConfigMap defines rules for pods to exclude from drain during node updates.
+#
+# Discovery: Controller discovers this ConfigMap by label mco.in-cloud.io/drain-config=true
+#
+# Rule Logic:
+#   - rules: OR between rules (any rule match = skip pod)
+#   - within rule: AND (all specified conditions must match)
+#
+# Usage:
+#   kubectl apply -f mco-drain-config.yaml
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mco-drain-config
+  namespace: mco-system
+  labels:
+    mco.in-cloud.io/drain-config: "true"
+data:
+  config.yaml: |
+    # Default settings
+    defaults:
+      # Skip pods with tolerations: [{operator: Exists}] that tolerate all taints.
+      # These pods can be scheduled on cordoned nodes, causing infinite drain loops.
+      skipToleratAllPods: true
+
+    # Exclusion rules (OR logic - any rule match = skip pod)
+    rules:
+      # Skip all pods in kube-system namespace
+      - namespaces:
+          - kube-system
+          - kube-public
+
+      # Skip pods in namespaces with common prefixes
+      - namespacePrefixes:
+          - "kube-"
+          - "in-cloud-"
+
+      # Skip debug/troubleshooting pods by name pattern
+      - podNamePatterns:
+          - "netshoot-*"
+          - "debug-*"
+          - "busybox-*"
+
+      # Skip pods with explicit skip-drain label
+      - podSelector:
+          matchLabels:
+            mco.in-cloud.io/skip-drain: "true"
+
+      # Example: Combined rule (AND logic within rule)
+      # Skip pods in monitoring namespace that have critical=false label
+      # - namespaces:
+      #     - monitoring
+      #   podSelector:
+      #     matchLabels:
+      #       critical: "false"

@@ -2,5 +2,6 @@
 resources:
 - mco_v1alpha1_machineconfig.yaml
 - mco_v1alpha1_machineconfigpool.yaml
+- mco-drain-config.yaml
 # Note: RenderedMachineConfig is normally created by controller
 # - mco_v1alpha1_renderedmachineconfig.yaml

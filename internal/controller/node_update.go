@@ -13,6 +13,7 @@ import (
 
 	mcov1alpha1 "in-cloud.io/machine-config/api/v1alpha1"
 	"in-cloud.io/machine-config/pkg/annotations"
+	"in-cloud.io/machine-config/pkg/drain"
 )
 
 // NodeUpdateResult contains the result of processing a node update.
@@ -35,6 +36,8 @@ type NodeUpdateResult struct {
 // drainRetrySeconds specifies the interval between drain retry attempts.
 // If drainTimeoutSeconds is 0, DefaultDrainTimeoutSeconds (3600) is used.
 // If drainRetrySeconds is 0, it is calculated as max(30, drainTimeoutSeconds/12).
+// drainExclusions specifies custom pod exclusion rules from the drain config ConfigMap.
+// mcoNamespace specifies the namespace where MCO components run (used to skip MCO pods during drain).
 func ProcessNodeUpdate(
 	ctx context.Context,
 	c client.Client,
@@ -43,6 +46,8 @@ func ProcessNodeUpdate(
 	targetRevision string,
 	drainTimeoutSeconds int,
 	drainRetrySeconds int,
+	drainExclusions *drain.DrainConfig,
+	mcoNamespace string,
 	events *EventRecorder,
 ) NodeUpdateResult {
 	logger := log.FromContext(ctx)
@@ -97,20 +102,20 @@ func ProcessNodeUpdate(
 		}
 	}
 
-	drainConfig := DrainConfig{
+	drainConfig := DrainOptions{
 		GracePeriod:   -1,
 		IgnoreDS:      true,
 		DeleteOrphans: true,
 	}
 
-	complete, err := IsDrainComplete(ctx, c, node, drainConfig)
+	complete, err := IsDrainCompleteWithExclusions(ctx, c, node, drainConfig, drainExclusions, mcoNamespace)
 	if err != nil {
 		logger.Error(err, "failed to check drain status", "node", node.Name)
 		return NodeUpdateResult{Result: ctrl.Result{RequeueAfter: 5 * time.Second}}
 	}
 
 	if !complete {
-		if err := DrainNode(ctx, c, node, drainConfig); err != nil {
+		if err := DrainNodeWithExclusions(ctx, c, node, drainConfig, drainExclusions, mcoNamespace); err != nil {
 			logger.Info("drain incomplete, scheduling retry", "node", node.Name, "error", err)
 			retry := HandleDrainRetry(ctx, c, node, drainTimeoutSeconds, drainRetrySeconds)
 

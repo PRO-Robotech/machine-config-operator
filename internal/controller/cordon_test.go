@@ -196,21 +196,7 @@ func TestShouldUncordon(t *testing.T) {
 			expected:       false,
 		},
 		{
-			name: "cordoned but not done",
-			node: &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Annotations: map[string]string{
-						annotations.Cordoned:        "true",
-						annotations.CurrentRevision: "rev-1",
-						annotations.AgentState:      annotations.StateApplying,
-					},
-				},
-			},
-			targetRevision: "rev-1",
-			expected:       false,
-		},
-		{
-			name: "should uncordon",
+			name: "revision match with state done",
 			node: &corev1.Node{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
@@ -222,6 +208,75 @@ func TestShouldUncordon(t *testing.T) {
 			},
 			targetRevision: "rev-1",
 			expected:       true,
+		},
+		{
+			name: "revision match with state idle",
+			node: &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						annotations.Cordoned:        "true",
+						annotations.CurrentRevision: "rev-1",
+						annotations.AgentState:      annotations.StateIdle,
+					},
+				},
+			},
+			targetRevision: "rev-1",
+			expected:       true,
+		},
+		{
+			name: "revision match with state applying",
+			node: &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						annotations.Cordoned:        "true",
+						annotations.CurrentRevision: "rev-1",
+						annotations.AgentState:      annotations.StateApplying,
+					},
+				},
+			},
+			targetRevision: "rev-1",
+			expected:       true,
+		},
+		{
+			name: "revision match with state error",
+			node: &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						annotations.Cordoned:        "true",
+						annotations.CurrentRevision: "rev-1",
+						annotations.AgentState:      annotations.StateError,
+					},
+				},
+			},
+			targetRevision: "rev-1",
+			expected:       true,
+		},
+		{
+			name: "revision match with empty state",
+			node: &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						annotations.Cordoned:        "true",
+						annotations.CurrentRevision: "rev-1",
+					},
+				},
+			},
+			targetRevision: "rev-1",
+			expected:       true,
+		},
+		{
+			name: "revision mismatch any state",
+			node: &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						annotations.Cordoned:        "true",
+						annotations.CurrentRevision: "rev-0",
+						annotations.AgentState:      annotations.StateIdle,
+					},
+				},
+			},
+			targetRevision: "rev-1",
+			expected:       false,
 		},
 	}
 

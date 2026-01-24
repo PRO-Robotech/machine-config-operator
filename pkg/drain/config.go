@@ -28,8 +28,9 @@ import (
 )
 
 const (
-	DrainConfigLabel   = "mco.in-cloud.io/drain-config"
-	DrainConfigDataKey = "config.yaml"
+	DrainConfigLabel      = "mco.in-cloud.io/drain-config"
+	DrainConfigLabelValue = "true"
+	DrainConfigDataKey    = "config.yaml"
 )
 
 const (
@@ -66,7 +67,7 @@ func LoadDrainConfig(ctx context.Context, c client.Client, namespace string) (Lo
 	cmList := &corev1.ConfigMapList{}
 	if err := c.List(ctx, cmList,
 		client.InNamespace(namespace),
-		client.MatchingLabels{DrainConfigLabel: "true"},
+		client.MatchingLabels{DrainConfigLabel: DrainConfigLabelValue},
 	); err != nil {
 		return LoadDrainConfigResult{}, fmt.Errorf("failed to list drain config ConfigMaps: %w", err)
 	}

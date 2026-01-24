@@ -35,7 +35,7 @@ func TestLoadDrainConfig_Found(t *testing.T) {
 			Name:      "mco-drain-config",
 			Namespace: "mco-system",
 			Labels: map[string]string{
-				DrainConfigLabel: "true",
+				DrainConfigLabel: DrainConfigLabelValue,
 			},
 		},
 		Data: map[string]string{
@@ -126,7 +126,7 @@ func TestLoadDrainConfig_InvalidYAML(t *testing.T) {
 			Name:      "mco-drain-config",
 			Namespace: "mco-system",
 			Labels: map[string]string{
-				DrainConfigLabel: "true",
+				DrainConfigLabel: DrainConfigLabelValue,
 			},
 		},
 		Data: map[string]string{
@@ -180,7 +180,7 @@ func TestLoadDrainConfig_EmptyData(t *testing.T) {
 			Name:      "mco-drain-config",
 			Namespace: "mco-system",
 			Labels: map[string]string{
-				DrainConfigLabel: "true",
+				DrainConfigLabel: DrainConfigLabelValue,
 			},
 		},
 		Data: map[string]string{
@@ -221,7 +221,7 @@ func TestLoadDrainConfig_ExplicitFalseSkipToleratAll(t *testing.T) {
 			Name:      "mco-drain-config",
 			Namespace: "mco-system",
 			Labels: map[string]string{
-				DrainConfigLabel: "true",
+				DrainConfigLabel: DrainConfigLabelValue,
 			},
 		},
 		Data: map[string]string{

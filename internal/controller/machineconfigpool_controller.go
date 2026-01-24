@@ -629,7 +629,7 @@ func (r *MachineConfigPoolReconciler) mapDrainConfigToStuckPools(ctx context.Con
 	if cm.Namespace != r.Namespace {
 		return nil
 	}
-	if cm.Labels == nil || cm.Labels[drain.DrainConfigLabel] != "true" {
+	if cm.Labels == nil || cm.Labels[drain.DrainConfigLabel] != drain.DrainConfigLabelValue {
 		return nil
 	}
 

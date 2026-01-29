@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -36,12 +37,20 @@ import (
 
 	mcov1alpha1 "in-cloud.io/machine-config/api/v1alpha1"
 	"in-cloud.io/machine-config/internal/renderer"
+	"in-cloud.io/machine-config/pkg/drain"
 )
+
+// DefaultMCONamespace is the fallback namespace when POD_NAMESPACE is not set.
+const DefaultMCONamespace = "machine-config-system"
 
 // MachineConfigPoolReconciler reconciles a MachineConfigPool object.
 type MachineConfigPoolReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// Namespace is the namespace where MCO components run.
+	// Read from POD_NAMESPACE env var, defaults to "machine-config-system".
+	Namespace string
 
 	// Components
 	debounce  *DebounceState
@@ -52,9 +61,15 @@ type MachineConfigPoolReconciler struct {
 
 // NewMachineConfigPoolReconciler creates a new reconciler with all components.
 func NewMachineConfigPoolReconciler(c client.Client, scheme *runtime.Scheme) *MachineConfigPoolReconciler {
+	namespace := os.Getenv("POD_NAMESPACE")
+	if namespace == "" {
+		namespace = DefaultMCONamespace
+	}
+
 	return &MachineConfigPoolReconciler{
 		Client:    c,
 		Scheme:    scheme,
+		Namespace: namespace,
 		debounce:  NewDebounceState(),
 		annotator: NewNodeAnnotator(c),
 		cleaner:   NewRMCCleaner(c),
@@ -71,6 +86,7 @@ func NewMachineConfigPoolReconciler(c client.Client, scheme *runtime.Scheme) *Ma
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods/eviction,verbs=create
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch;update
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 
 // Reconcile handles MachineConfigPool reconciliation.
 func (r *MachineConfigPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -269,10 +285,25 @@ func (r *MachineConfigPoolReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	// Get drain retry interval from spec (0 means auto-calculate)
 	drainRetrySeconds := pool.Spec.Rollout.DrainRetrySeconds
 
+	// Load drain exclusion config from ConfigMap in MCO namespace
+	drainConfigResult, err := drain.LoadDrainConfig(ctx, r.Client, r.Namespace)
+	if err != nil {
+		log.Error(err, "failed to load drain config, using defaults")
+		drainConfigResult.Config = drain.DefaultDrainConfig()
+	}
+	drainConfig := drainConfigResult.Config
+
+	// Emit warning event if ConfigMap had invalid YAML (soft failure)
+	if drainConfigResult.ParseWarning != nil {
+		log.Error(drainConfigResult.ParseWarning, "drain config invalid, using defaults",
+			"configMapRef", drainConfigResult.ConfigMapRef)
+		r.events.DrainConfigInvalid(pool, drainConfigResult.ConfigMapRef, drainConfigResult.ParseWarning)
+	}
+
 	for i := range nodesToProcess {
 		node := &nodesToProcess[i]
 
-		result := ProcessNodeUpdate(ctx, r.Client, pool, node, rmc.Name, drainTimeoutSeconds, drainRetrySeconds, r.events)
+		result := ProcessNodeUpdate(ctx, r.Client, pool, node, rmc.Name, drainTimeoutSeconds, drainRetrySeconds, drainConfig, r.Namespace, r.events)
 
 		// Emit lifecycle events based on result flags
 		if result.Cordoned {
@@ -505,6 +536,7 @@ func (r *MachineConfigPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&mcov1alpha1.RenderedMachineConfig{}).
 		Watches(&mcov1alpha1.MachineConfig{}, handler.EnqueueRequestsFromMapFunc(r.mapMachineConfigToPool)).
 		Watches(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(r.mapNodeToPool)).
+		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.mapDrainConfigToStuckPools)).
 		Complete(r)
 }
 
@@ -583,4 +615,48 @@ func (r *MachineConfigPoolReconciler) listAllPoolNames(ctx context.Context) ([]s
 		names[i] = pool.Name
 	}
 	return names, nil
+}
+
+// mapDrainConfigToStuckPools triggers reconcile ONLY for pools with DrainStuck=True
+// when drain config ConfigMap changes. This allows fast reaction to config changes
+// without affecting healthy pools.
+func (r *MachineConfigPoolReconciler) mapDrainConfigToStuckPools(ctx context.Context, obj client.Object) []reconcile.Request {
+	cm, ok := obj.(*corev1.ConfigMap)
+	if !ok {
+		return nil
+	}
+
+	if cm.Namespace != r.Namespace {
+		return nil
+	}
+	if cm.Labels == nil || cm.Labels[drain.DrainConfigLabel] != drain.DrainConfigLabelValue {
+		return nil
+	}
+
+	// List all pools
+	pools := &mcov1alpha1.MachineConfigPoolList{}
+	if err := r.List(ctx, pools); err != nil {
+		return nil
+	}
+
+	// Only enqueue pools with DrainStuck=True condition
+	var requests []reconcile.Request
+	for _, pool := range pools.Items {
+		if hasConditionStatus(&pool, mcov1alpha1.ConditionDrainStuck, metav1.ConditionTrue) {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: client.ObjectKeyFromObject(&pool),
+			})
+		}
+	}
+	return requests
+}
+
+// hasConditionStatus checks if pool has a specific condition with given status.
+func hasConditionStatus(pool *mcov1alpha1.MachineConfigPool, condType string, status metav1.ConditionStatus) bool {
+	for _, c := range pool.Status.Conditions {
+		if c.Type == condType && c.Status == status {
+			return true
+		}
+	}
+	return false
 }

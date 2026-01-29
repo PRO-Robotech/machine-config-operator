@@ -3,6 +3,7 @@ name: Lint
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
 
@@ -22,4 +23,4 @@ jobs:
       - name: Run linter
         uses: golangci/golangci-lint-action@v8
         with:
-          version: v2.5.0
+          version: v2.7.2

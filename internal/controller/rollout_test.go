@@ -481,7 +481,9 @@ func TestCollectNodesInProgress_Applying(t *testing.T) {
 }
 
 func TestCollectNodesInProgress_AlreadyAtTarget(t *testing.T) {
-	// Node is cordoned but already at target revision - should NOT be in progress
+	// Node is cordoned and already at target revision - SHOULD be in progress
+	// because it still needs lifecycle cleanup (uncordon + drain annotation cleanup).
+	// Revision match means config is applied, but node stays in-progress until uncordoned.
 	nodes := []corev1.Node{
 		{ObjectMeta: metav1.ObjectMeta{Name: "node-done", Annotations: map[string]string{
 			annotations.Cordoned:        "true",
@@ -490,8 +492,8 @@ func TestCollectNodesInProgress_AlreadyAtTarget(t *testing.T) {
 	}
 
 	result := collectNodesInProgress(nodes, "rev-1")
-	if len(result) != 0 {
-		t.Errorf("expected 0 in-progress nodes (already at target), got %d", len(result))
+	if len(result) != 1 {
+		t.Errorf("expected 1 in-progress node (needs uncordon cleanup), got %d", len(result))
 	}
 }
 

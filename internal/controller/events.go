@@ -60,6 +60,9 @@ const (
 
 	// ReasonDrainFailed indicates a drain attempt failed (will retry).
 	ReasonDrainFailed = "DrainFailed"
+
+	// ReasonDrainConfigInvalid indicates the drain config ConfigMap has invalid YAML.
+	ReasonDrainConfigInvalid = "DrainConfigInvalid"
 )
 
 // EventRecorder provides methods to emit Kubernetes events for rolling update lifecycle.
@@ -177,6 +180,16 @@ func (e *EventRecorder) DrainFailed(pool *mcov1alpha1.MachineConfigPool, nodeNam
 	}
 	e.recorder.Eventf(pool, corev1.EventTypeWarning, ReasonDrainFailed,
 		"Drain failed on node %s: %s (will retry)", nodeName, reason)
+}
+
+// DrainConfigInvalid emits a warning event when drain config ConfigMap has invalid YAML.
+// The controller will use default drain settings when this occurs.
+func (e *EventRecorder) DrainConfigInvalid(pool *mcov1alpha1.MachineConfigPool, configMapRef string, parseErr error) {
+	if e.recorder == nil {
+		return
+	}
+	e.recorder.Eventf(pool, corev1.EventTypeWarning, ReasonDrainConfigInvalid,
+		"Drain config ConfigMap %s has invalid YAML: %v. Using defaults.", configMapRef, parseErr)
 }
 
 // CreateEventRecorder creates an EventRecorder from a manager's scheme.

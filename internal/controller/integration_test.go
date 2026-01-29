@@ -328,10 +328,16 @@ func TestUncordon_AfterAgentDone(t *testing.T) {
 		t.Error("ShouldUncordon should return false when target differs")
 	}
 
-	// Test negative case - not done yet
+	// Test that agent state is NOT checked for uncordon decision.
+	// When revision matches, node should uncordon regardless of agent state (idle/applying/done).
 	node.Annotations[annotations.AgentState] = "applying"
-	if ShouldUncordon(node, targetRevision) {
-		t.Error("ShouldUncordon should return false when state is not done")
+	if !ShouldUncordon(node, targetRevision) {
+		t.Error("ShouldUncordon should return true when revision matches, regardless of state")
+	}
+
+	node.Annotations[annotations.AgentState] = "idle"
+	if !ShouldUncordon(node, targetRevision) {
+		t.Error("ShouldUncordon should return true when revision matches, regardless of state")
 	}
 }
 
